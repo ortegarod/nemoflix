@@ -1,0 +1,77 @@
+# Wan 2.2 I2V 14B character LoRA for a character likeness.
+# Source template: ostris/ai-toolkit config/examples/train_lora_wan22_14b_24gb.yaml
+# I2V-specific arch/options confirmed in ui/src/app/jobs/new/options.ts.
+---
+job: extension
+config:
+  name: "character_wan22_i2v_v1"
+  process:
+    - type: "sd_trainer"
+      training_folder: "/root/nemoflix-training/output"
+      device: cuda:0
+      trigger_word: "character_trigger"
+      network:
+        type: "lora"
+        linear: 32
+        linear_alpha: 32
+      save:
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 6
+      datasets:
+        - folder_path: "/root/nemoflix-training/datasets/character-wan-i2v"
+          caption_ext: "txt"
+          caption_dropout_rate: 0.05
+          num_frames: 41
+          resolution: [512, 768, 1024]
+      train:
+        batch_size: 1
+        steps: 2500
+        gradient_accumulation: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        timestep_type: "sigmoid"
+        optimizer: "adamw8bit"
+        lr: 1e-4
+        optimizer_params:
+          weight_decay: 1e-4
+        dtype: bf16
+        switch_boundary_every: 10
+        # Keep captions live for character training and DOP experiments.
+        # If memory is tight, switch to cache_text_embeddings and remove DOP.
+        cache_text_embeddings: false
+      model:
+        name_or_path: "ai-toolkit/Wan2.2-I2V-A14B-Diffusers-bf16"
+        arch: "wan22_14b_i2v"
+        quantize: true
+        qtype: "uint4|ostris/accuracy_recovery_adapters/wan22_14b_i2v_torchao_uint4.safetensors"
+        quantize_te: true
+        qtype_te: "qfloat8"
+        low_vram: false
+        model_kwargs:
+          train_high_noise: true
+          train_low_noise: true
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 768
+        height: 768
+        num_frames: 41
+        fps: 16
+        # Wan I2V samples require a prompt + ctrl_img pair.
+        # Replace this once we have character control/reference frames.
+        ctrl_img: "/root/nemoflix-training/samples/character_control.jpg"
+        prompts:
+          - "character_trigger, person, cinematic portrait, walking in heavy rain, dramatic lighting"
+          - "character_trigger, person, wearing futuristic armor, rain-soaked city street, cinematic"
+          - "character_trigger, person, close-up face, intense expression, film still, shallow depth of field"
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 3.5
+        sample_steps: 25
+meta:
+  name: "[name]"
+  version: "1.0"

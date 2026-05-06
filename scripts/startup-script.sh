@@ -147,3 +147,4 @@ curl -sS --max-time 5 http://127.0.0.1:8190/api/health
 
 echo "=== Setup Complete ==="
 echo "Install Wan 2.2 video stack: $APP_DIR/scripts/install-video-stack.sh"
+echo "Install AI Toolkit training stack: $APP_DIR/scripts/install-ai-toolkit.sh"

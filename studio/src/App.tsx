@@ -1,17 +1,24 @@
 import { useState, useEffect, useCallback } from "react";
-import type { MediaItem } from "./types";
+import { JobCard } from "./components/JobCard";
+import type { JobItem, MediaItem } from "./types";
 
 export default function App() {
   const [items, setItems] = useState<MediaItem[]>([]);
+  const [jobs, setJobs] = useState<JobItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/listing");
-      const data = await res.json();
-      setItems(data.images || []);
+      const [listingRes, jobsRes] = await Promise.all([
+        fetch("/api/listing"),
+        fetch("/api/jobs"),
+      ]);
+      const listing = await listingRes.json();
+      const jobData = await jobsRes.json();
+      setItems(listing.images || []);
+      setJobs(jobData.jobs || []);
     } catch (e) {
       console.error(e);
     } finally {
@@ -21,25 +28,39 @@ export default function App() {
 
   useEffect(() => {
     load();
+    const id = window.setInterval(load, 3000);
+    return () => window.clearInterval(id);
   }, [load]);
+
+  const hasContent = jobs.length > 0 || items.length > 0;
 
   return (
     <div className="min-h-screen bg-black text-white">
       <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Nemoflix AMD Gallery</h1>
-        <span className="text-sm text-gray-500">{items.length} items</span>
+        <div>
+          <h1 className="text-xl font-semibold">Nemoflix AMD Gallery</h1>
+          <p className="text-xs text-gray-500 mt-1">Live from the MI300X droplet</p>
+        </div>
+        <div className="text-sm text-gray-500">
+          {jobs.length > 0 && <span className="text-amber-400 mr-3">{jobs.length} generating</span>}
+          <span>{items.length} media</span>
+        </div>
       </header>
 
       <main className="p-6">
-        {loading && items.length === 0 ? (
+        {loading && !hasContent ? (
           <p className="text-gray-500">Loading...</p>
-        ) : items.length === 0 ? (
+        ) : !hasContent ? (
           <p className="text-gray-500">No media yet.</p>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
+            {jobs.map((job) => (
+              <JobCard key={job.prompt_id} job={job} />
+            ))}
+
             {items.map((item) => (
               <div
-                key={item.name}
+                key={item.url}
                 onClick={() => setSelected(item.url)}
                 className="cursor-pointer rounded-lg overflow-hidden border border-gray-800 hover:border-rose-600 transition aspect-video bg-gray-900 relative group"
               >

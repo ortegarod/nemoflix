@@ -1,0 +1,78 @@
+# FLUX.2 [dev] identity/character LoRA template for AI Toolkit.
+# Source: Ostris AI Toolkit FLUX.2 UI defaults + RunComfy FLUX.2 LoRA guide.
+---
+job: extension
+config:
+  name: "identity_flux2_lora_v1"
+  process:
+    - type: "sd_trainer"
+      training_folder: "/root/nemoflix-training/output"
+      device: cuda:0
+      # Replace with the private trigger for the subject, e.g. a short unique token.
+      trigger_word: "character_trigger"
+      network:
+        type: "lora"
+        linear: 32
+        linear_alpha: 32
+      save:
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 4
+        push_to_hub: false
+      datasets:
+        - folder_path: "/root/nemoflix-training/datasets/identity-flux2"
+          caption_ext: "txt"
+          # Static captions + cached text embeddings: keep dropout at 0.
+          caption_dropout_rate: 0
+          shuffle_tokens: false
+          cache_latents_to_disk: true
+          resolution: [768, 896, 1024]
+      train:
+        batch_size: 1
+        steps: 1800
+        gradient_accumulation_steps: 1
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: "flowmatch"
+        timestep_type: "weighted"
+        optimizer: "adamw8bit"
+        lr: 1e-4
+        optimizer_params:
+          weight_decay: 1e-4
+        dtype: bf16
+        # First pass: no DOP, static captions, cache embeddings for speed/VRAM.
+        unload_text_encoder: false
+        cache_text_embeddings: true
+        ema_config:
+          use_ema: false
+      model:
+        name_or_path: "black-forest-labs/FLUX.2-dev"
+        arch: "flux2"
+        quantize: true
+        qtype: "qfloat8"
+        quantize_te: true
+        qtype_te: "qfloat8"
+        low_vram: false
+        model_kwargs:
+          match_target_res: false
+      sample:
+        sampler: "flowmatch"
+        sample_every: 250
+        width: 1024
+        height: 1024
+        prompts:
+          - "character_trigger, man, realistic Instagram travel photo, standing on a cliff at golden hour, ocean in the background, natural pose, shot on a mirrorless camera"
+          - "character_trigger, man, lifestyle creator photo, sitting at an outdoor cafe with a laptop and coffee, warm afternoon light, candid social media photography"
+          - "character_trigger, man, action sports photo, snowboarding down a mountain slope, powder snow, dynamic pose, realistic telephoto shot"
+          - "character_trigger, man, fitness lifestyle photo, post-workout portrait outside a modern gym, athletic casual clothing, natural light, authentic Instagram content"
+          - "character_trigger, man, editorial streetwear photo, walking through a downtown city street at sunset, stylish outfit, shallow depth of field, realistic fashion photography"
+          - "photo of a man, realistic social media portrait, white background, medium shot, studio lighting"
+        neg: ""
+        seed: 42
+        walk_seed: false
+        guidance_scale: 1
+        sample_steps: 25
+meta:
+  name: "[name]"
+  version: "1.0"

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-from uuid import uuid4
+from urllib.parse import urlparse, urlunparse
+
+import websockets
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -82,6 +88,143 @@ class JobStatusResponse(BaseModel):
 def comfy() -> ComfyClient:
     settings = get_settings()
     return ComfyClient(settings.comfy_url, settings.request_timeout_seconds)
+
+
+_JOBS: dict[str, dict[str, Any]] = {}
+_COMFY_CLIENT_ID = "nemoflix-amd-gallery"
+_WS_TASK: asyncio.Task | None = None
+
+
+def _ws_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return urlunparse((scheme, parsed.netloc, "/ws", "", f"clientId={_COMFY_CLIENT_ID}", ""))
+
+
+def _register_submitted_job(prompt_id: str | None, body: VideoGenerateRequest, status: str = "pending") -> None:
+    if not prompt_id:
+        return
+    _JOBS[prompt_id] = {
+        "prompt_id": prompt_id,
+        "status": status,
+        "mode": body.mode,
+        "prompt": body.prompt,
+        "width": body.width,
+        "height": body.height,
+        "length": body.length,
+        "fps": body.fps,
+        "created_at": datetime.now(UTC).isoformat(),
+        "current_node": None,
+        "step_value": 0,
+        "step_max": 0,
+        "nodes_finished": 0,
+        "nodes_total": 0,
+        "progress_percent": None,
+    }
+
+
+def _update_job_from_progress_state(prompt_id: str, nodes: dict[str, Any]) -> None:
+    if not prompt_id:
+        return
+    job = _JOBS.setdefault(prompt_id, {"prompt_id": prompt_id, "status": "running", "created_at": None})
+    total = len(nodes)
+    finished = 0
+    running = 0
+    current_node = None
+    step_value = 0
+    step_max = 0
+    for node_id, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        state = node.get("state")
+        if state == "finished":
+            finished += 1
+        elif state == "running":
+            running += 1
+            if current_node is None:
+                current_node = node.get("display_node_id") or node.get("node_id") or node_id
+                step_value = int(node.get("value") or 0)
+                step_max = int(node.get("max") or 0)
+    percent = round((finished / total) * 100, 1) if total else None
+    job.update({
+        "status": "running",
+        "nodes_total": total,
+        "nodes_finished": finished,
+        "nodes_running": running,
+        "current_node": current_node,
+        "step_value": step_value,
+        "step_max": step_max,
+        "progress_percent": percent,
+        "updated_at": datetime.now(UTC).isoformat(),
+    })
+
+
+async def _comfy_ws_bridge() -> None:
+    settings = get_settings()
+    url = _ws_url(settings.comfy_url)
+    while True:
+        try:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+                async for raw in ws:
+                    if isinstance(raw, bytes):
+                        continue
+                    try:
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    msg_type = msg.get("type")
+                    data = msg.get("data", {}) if isinstance(msg.get("data"), dict) else {}
+                    prompt_id = data.get("prompt_id") or data.get("prompt")
+                    if msg_type == "execution_start" and isinstance(prompt_id, str):
+                        _JOBS.setdefault(prompt_id, {"prompt_id": prompt_id, "created_at": None}).update({"status": "running"})
+                    elif msg_type == "progress_state" and isinstance(prompt_id, str):
+                        nodes = data.get("nodes", {})
+                        if isinstance(nodes, dict):
+                            _update_job_from_progress_state(prompt_id, nodes)
+                    elif msg_type == "progress" and isinstance(prompt_id, str):
+                        job = _JOBS.setdefault(prompt_id, {"prompt_id": prompt_id, "status": "running", "created_at": None})
+                        value = int(data.get("value") or 0)
+                        max_value = int(data.get("max") or 0)
+                        job.update({
+                            "status": "running",
+                            "step_value": value,
+                            "step_max": max_value,
+                            "progress_percent": round((value / max_value) * 100, 1) if max_value else None,
+                            "updated_at": datetime.now(UTC).isoformat(),
+                        })
+                    elif msg_type == "execution_success" and isinstance(prompt_id, str):
+                        _JOBS.setdefault(prompt_id, {"prompt_id": prompt_id, "created_at": None}).update({
+                            "status": "completed",
+                            "progress_percent": 100,
+                            "updated_at": datetime.now(UTC).isoformat(),
+                        })
+                    elif msg_type in {"execution_error", "execution_interrupted"} and isinstance(prompt_id, str):
+                        _JOBS.setdefault(prompt_id, {"prompt_id": prompt_id, "created_at": None}).update({
+                            "status": "failed",
+                            "error": data.get("exception_message") or msg_type,
+                            "updated_at": datetime.now(UTC).isoformat(),
+                        })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            await asyncio.sleep(3)
+
+
+@app.on_event("startup")
+async def start_comfy_bridge() -> None:
+    global _WS_TASK
+    if _WS_TASK is None or _WS_TASK.done():
+        _WS_TASK = asyncio.create_task(_comfy_ws_bridge())
+
+
+@app.on_event("shutdown")
+async def stop_comfy_bridge() -> None:
+    global _WS_TASK
+    if _WS_TASK:
+        _WS_TASK.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _WS_TASK
+        _WS_TASK = None
 
 
 @app.get("/api/health")
@@ -170,14 +313,16 @@ async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
         return VideoGenerateResponse(ok=True, mode=body.mode, workflow=workflow)
 
     try:
-        result = await comfy().queue_prompt(workflow, client_id=str(uuid4()))
+        result = await comfy().queue_prompt(workflow, client_id=_COMFY_CLIENT_ID)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"ComfyUI prompt submission failed: {exc}") from exc
 
+    prompt_id = result.get("prompt_id")
+    _register_submitted_job(prompt_id, body, "pending")
     return VideoGenerateResponse(
         ok="prompt_id" in result,
         mode=body.mode,
-        prompt_id=result.get("prompt_id"),
+        prompt_id=prompt_id,
         number=result.get("number"),
         node_errors=result.get("node_errors"),
     )
@@ -222,6 +367,54 @@ async def _queue_position(client: ComfyClient, prompt_id: str) -> int | None:
         if isinstance(item, list) and len(item) > 1 and item[1] == prompt_id:
             return index
     return None
+
+
+@app.get("/api/jobs")
+async def jobs() -> dict[str, Any]:
+    """Return jobs submitted through this API.
+
+    ComfyUI is still the execution engine, but this endpoint intentionally does
+    not list arbitrary Comfy queue entries. The gallery should only show jobs we
+    submitted and registered locally; completed media is discovered separately by
+    /api/listing.
+    """
+    client = comfy()
+
+    try:
+        queue = await client.get("/queue")
+    except Exception as exc:  # noqa: BLE001
+        jobs_list = sorted(_JOBS.values(), key=lambda j: j.get("created_at") or "", reverse=True)
+        return {"jobs": jobs_list, "count": len(jobs_list), "error": str(exc)}
+
+    running_ids: set[str] = set()
+    pending_positions: dict[str, int] = {}
+
+    for item in queue.get("queue_running", []) if isinstance(queue, dict) else []:
+        if isinstance(item, list) and len(item) > 1 and isinstance(item[1], str):
+            running_ids.add(item[1])
+
+    for position, item in enumerate(queue.get("queue_pending", []) if isinstance(queue, dict) else [], start=1):
+        if isinstance(item, list) and len(item) > 1 and isinstance(item[1], str):
+            pending_positions[item[1]] = position
+
+    for prompt_id, job in _JOBS.items():
+        if job.get("status") in {"completed", "failed"}:
+            continue
+        if prompt_id in running_ids:
+            job["status"] = "running"
+            job["queue_position"] = None
+        elif prompt_id in pending_positions:
+            job["status"] = "pending"
+            job["queue_position"] = pending_positions[prompt_id]
+        elif job.get("status") in {"pending", "running"}:
+            job["status"] = "unknown"
+            job["queue_position"] = None
+
+    jobs_list = sorted(
+        _JOBS.values(),
+        key=lambda j: (j.get("status") != "running", j.get("queue_position") or 0, j.get("created_at") or ""),
+    )
+    return {"jobs": jobs_list, "count": len(jobs_list)}
 
 
 @app.get("/api/jobs/{prompt_id}", response_model=JobStatusResponse)

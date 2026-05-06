@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 python-multipart==0.0.20
 pydantic-settings==2.7.1
+websockets==16.0
