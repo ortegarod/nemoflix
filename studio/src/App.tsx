@@ -1,30 +1,42 @@
 import { useState, useEffect, useCallback } from "react";
 import { JobCard } from "./components/JobCard";
-import type { JobItem, MediaItem } from "./types";
+import { LoraTrainingCard } from "./components/LoraTrainingCard";
+import { LoraCheckpointsCard } from "./components/LoraCheckpointsCard";
+import type { JobItem, LoraCheckpoint, LoraTrainingStatus, MediaItem } from "./types";
 
 export default function App() {
   const [items, setItems] = useState<MediaItem[]>([]);
   const [jobs, setJobs] = useState<JobItem[]>([]);
+  const [training, setTraining] = useState<LoraTrainingStatus | null>(null);
+  const [checkpoints, setCheckpoints] = useState<LoraCheckpoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnce) setLoading(true);
     try {
-      const [listingRes, jobsRes] = await Promise.all([
+      const [listingRes, jobsRes, trainingRes, checkpointsRes] = await Promise.all([
         fetch("/api/listing"),
         fetch("/api/jobs"),
+        fetch("/api/lora-training/status"),
+        fetch("/api/lora-training/checkpoints"),
       ]);
       const listing = await listingRes.json();
       const jobData = await jobsRes.json();
+      const trainingData = await trainingRes.json();
+      const checkpointsData = await checkpointsRes.json();
       setItems(listing.images || []);
       setJobs(jobData.jobs || []);
+      setTraining(trainingData.ok ? trainingData : null);
+      setCheckpoints(checkpointsData.checkpoints || []);
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
+      setHasLoadedOnce(true);
     }
-  }, []);
+  }, [hasLoadedOnce]);
 
   useEffect(() => {
     load();
@@ -48,7 +60,10 @@ export default function App() {
       </header>
 
       <main className="p-6">
-        {loading && !hasContent ? (
+        <LoraTrainingCard training={training} />
+        <LoraCheckpointsCard checkpoints={checkpoints} />
+
+        {loading && !hasLoadedOnce && !hasContent ? (
           <p className="text-gray-500">Loading...</p>
         ) : !hasContent ? (
           <p className="text-gray-500">No media yet.</p>

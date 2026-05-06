@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
+import subprocess
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +18,7 @@ from pydantic import BaseModel, Field
 
 from .comfy import ComfyClient
 from .config import get_settings
-from .workflows import WAN_NEGATIVE, build_wan22_i2v, build_wan22_t2v
+from .workflows import WAN_NEGATIVE, build_flux2_lora_image, build_wan22_i2v, build_wan22_t2v
 
 app = FastAPI(
     title="Nemoflix AMD API",
@@ -66,6 +68,34 @@ class VideoGenerateResponse(BaseModel):
     workflow: dict[str, Any] | None = None
 
 
+class LoraImageGenerateRequest(BaseModel):
+    checkpoint: str = Field(default="latest", description="Checkpoint filename, path under the LoRA output dir, or 'latest'")
+    prompt: str = Field(min_length=1)
+    width: int = 1024
+    height: int = 1024
+    seed: int | None = None
+    filename_prefix: str = "nemoflix-amd/flux2-lora"
+    steps: int = 20
+    cfg: float = 4.0
+    sampler: str = "euler"
+    guidance: float = 4.0
+    unet: str = "flux2_dev_fp8mixed.safetensors"
+    clip: str = "mistral_3_small_flux2_bf16.safetensors"
+    vae: str = "flux2-vae.safetensors"
+    lora_strength: float = 1.0
+    submit: bool = Field(default=True, description="false returns workflow JSON without queueing")
+
+
+class LoraImageGenerateResponse(BaseModel):
+    ok: bool
+    checkpoint: str
+    lora_name: str
+    prompt_id: str | None = None
+    number: int | None = None
+    node_errors: dict[str, Any] | None = None
+    workflow: dict[str, Any] | None = None
+
+
 class JobOutput(BaseModel):
     type: str
     filename: str
@@ -83,6 +113,41 @@ class JobStatusResponse(BaseModel):
     outputs_count: int | None = None
     outputs: list[JobOutput] = []
     raw: dict[str, Any] | None = None
+
+
+class LoraTrainingStatus(BaseModel):
+    ok: bool
+    status: str
+    job_name: str | None = None
+    current_step: int = 0
+    total_steps: int = 0
+    progress_percent: float | None = None
+    loss: float | None = None
+    lr: float | None = None
+    elapsed: str | None = None
+    eta: str | None = None
+    seconds_per_step: float | None = None
+    gpu_util: float | None = None
+    vram_percent: float | None = None
+    log_path: str | None = None
+    updated_at: str
+    error: str | None = None
+
+
+class LoraCheckpoint(BaseModel):
+    name: str
+    step: int | None = None
+    path: str
+    size_bytes: int
+    modified_at: str
+
+
+class LoraCheckpointsResponse(BaseModel):
+    ok: bool
+    job_name: str
+    checkpoints: list[LoraCheckpoint]
+    count: int
+    updated_at: str
 
 
 def comfy() -> ComfyClient:
@@ -453,6 +518,255 @@ from fastapi.responses import FileResponse
 
 _OUTPUT_DIR = Path("/root/ComfyUI/output")
 _ALLOW_EXT = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm", ".gif"}
+_LORA_TRAINING_LOG = Path(os.environ.get("NEMOFLIX_LORA_TRAINING_LOG", "/root/rigo-flux2-dop-train.log"))
+_LORA_JOB_NAME = os.environ.get("NEMOFLIX_LORA_JOB_NAME", "rigo_flux2_lora_v1_dop")
+_LORA_OUTPUT_DIR = Path(os.environ.get("NEMOFLIX_LORA_OUTPUT_DIR", f"/root/nemoflix-training/output/{_LORA_JOB_NAME}"))
+_COMFY_LORA_DIR = Path(os.environ.get("NEMOFLIX_COMFY_LORA_DIR", "/root/ComfyUI/models/loras/nemoflix-amd"))
+
+
+def _parse_rocm_value(pattern: str, text: str) -> float | None:
+    match = re.search(pattern, text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _read_gpu_status() -> tuple[float | None, float | None]:
+    try:
+        result = subprocess.run(
+            ["/opt/rocm/bin/rocm-smi", "--showuse", "--showmemuse"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None, None
+
+    output = result.stdout + result.stderr
+    gpu_util = _parse_rocm_value(r"GPU use \(%\):\s*([0-9.]+)", output)
+    vram_percent = _parse_rocm_value(r"GPU Memory Allocated \(VRAM%\):\s*([0-9.]+)", output)
+    return gpu_util, vram_percent
+
+
+def _latest_lora_progress(log_text: str) -> dict[str, Any] | None:
+    # TQDM writes carriage-return progress lines; search the whole tail chunk.
+    pattern = re.compile(
+        r"(?P<step>\d+)/(?:\s*)?(?P<total>\d+)\s*"
+        r"\[(?P<elapsed>[^\]<]+)<(?P<eta>[^,\]]+),\s*"
+        r"(?P<seconds>[0-9.]+)s/it,\s*lr:\s*(?P<lr>[0-9.eE+-]+)\s*loss:\s*(?P<loss>[0-9.eE+-]+)"
+    )
+    matches = list(pattern.finditer(log_text))
+    if not matches:
+        return None
+    match = matches[-1]
+    step = int(match.group("step"))
+    total = int(match.group("total"))
+    return {
+        "current_step": step,
+        "total_steps": total,
+        "progress_percent": round((step / total) * 100, 2) if total else None,
+        "loss": float(match.group("loss")),
+        "lr": float(match.group("lr")),
+        "elapsed": match.group("elapsed"),
+        "eta": match.group("eta"),
+        "seconds_per_step": float(match.group("seconds")),
+    }
+
+
+@app.get("/api/lora-training/status", response_model=LoraTrainingStatus)
+async def lora_training_status() -> LoraTrainingStatus:
+    gpu_util, vram_percent = _read_gpu_status()
+    updated_at = datetime.now(UTC).isoformat()
+
+    if not _LORA_TRAINING_LOG.exists():
+        return LoraTrainingStatus(
+            ok=False,
+            status="missing_log",
+            job_name=_LORA_JOB_NAME,
+            gpu_util=gpu_util,
+            vram_percent=vram_percent,
+            log_path=str(_LORA_TRAINING_LOG),
+            updated_at=updated_at,
+            error="Training log not found",
+        )
+
+    try:
+        log_text = _LORA_TRAINING_LOG.read_text(errors="replace")[-200_000:]
+    except Exception as exc:
+        return LoraTrainingStatus(
+            ok=False,
+            status="error",
+            job_name=_LORA_JOB_NAME,
+            gpu_util=gpu_util,
+            vram_percent=vram_percent,
+            log_path=str(_LORA_TRAINING_LOG),
+            updated_at=updated_at,
+            error=str(exc),
+        )
+
+    progress = _latest_lora_progress(log_text)
+    if not progress:
+        status = "starting" if "Running job" in log_text else "unknown"
+        return LoraTrainingStatus(
+            ok=True,
+            status=status,
+            job_name=_LORA_JOB_NAME,
+            gpu_util=gpu_util,
+            vram_percent=vram_percent,
+            log_path=str(_LORA_TRAINING_LOG),
+            updated_at=updated_at,
+        )
+
+    current_step = progress["current_step"]
+    total_steps = progress["total_steps"]
+    final_checkpoint = _LORA_OUTPUT_DIR / f"{_LORA_JOB_NAME}.safetensors"
+
+    completed = current_step >= total_steps
+    completed = completed or final_checkpoint.is_file()
+    completed = completed or "Done training" in log_text or "Training complete" in log_text
+    status = "completed" if completed else "training"
+
+    # ai-toolkit can finish by writing the final unnumbered checkpoint after the last
+    # progress line has already been emitted. In that case tqdm may leave the log at
+    # 1799/1800 even though training is actually complete. The final checkpoint is the
+    # durable source of truth, so normalize the displayed step to 100% when it exists.
+    if completed and final_checkpoint.is_file() and current_step < total_steps:
+        progress = {**progress, "current_step": total_steps, "progress_percent": 100.0, "eta": "00:00"}
+
+    return LoraTrainingStatus(
+        ok=True,
+        status=status,
+        job_name=_LORA_JOB_NAME,
+        gpu_util=gpu_util,
+        vram_percent=vram_percent,
+        log_path=str(_LORA_TRAINING_LOG),
+        updated_at=updated_at,
+        **progress,
+    )
+
+
+def _lora_checkpoint_path(checkpoint: str) -> Path:
+    if checkpoint == "latest":
+        candidates = sorted(
+            _LORA_OUTPUT_DIR.glob("*.safetensors"),
+            key=lambda path: path.stat().st_mtime,
+        ) if _LORA_OUTPUT_DIR.is_dir() else []
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No LoRA checkpoints found")
+        return candidates[-1]
+
+    path = Path(checkpoint)
+    if not path.is_absolute():
+        path = _LORA_OUTPUT_DIR / checkpoint
+    try:
+        resolved = path.resolve()
+        output_root = _LORA_OUTPUT_DIR.resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid checkpoint path: {checkpoint}") from exc
+    if not str(resolved).startswith(str(output_root)):
+        raise HTTPException(status_code=400, detail="Checkpoint must be inside the LoRA output directory")
+    if resolved.suffix != ".safetensors" or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return resolved
+
+
+def _comfy_lora_name_for_checkpoint(path: Path) -> str:
+    _COMFY_LORA_DIR.mkdir(parents=True, exist_ok=True)
+    link_path = _COMFY_LORA_DIR / path.name
+    if not link_path.exists():
+        link_path.symlink_to(path)
+    return f"nemoflix-amd/{path.name}"
+
+
+@app.post("/api/lora-training/generate", response_model=LoraImageGenerateResponse)
+async def generate_lora_image(body: LoraImageGenerateRequest) -> LoraImageGenerateResponse:
+    checkpoint_path = _lora_checkpoint_path(body.checkpoint)
+    lora_name = _comfy_lora_name_for_checkpoint(checkpoint_path)
+    workflow = build_flux2_lora_image(
+        prompt=body.prompt,
+        lora_name=lora_name,
+        width=body.width,
+        height=body.height,
+        seed=body.seed,
+        filename_prefix=body.filename_prefix,
+        steps=body.steps,
+        cfg=body.cfg,
+        sampler=body.sampler,
+        guidance=body.guidance,
+        unet=body.unet,
+        clip=body.clip,
+        vae=body.vae,
+        lora_strength=body.lora_strength,
+    )
+
+    if not body.submit:
+        return LoraImageGenerateResponse(ok=True, checkpoint=checkpoint_path.name, lora_name=lora_name, workflow=workflow)
+
+    try:
+        result = await comfy().queue_prompt(workflow, client_id=_COMFY_CLIENT_ID)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"ComfyUI prompt submission failed: {exc}") from exc
+
+    prompt_id = result.get("prompt_id")
+    if prompt_id:
+        _JOBS[prompt_id] = {
+            "prompt_id": prompt_id,
+            "status": "pending",
+            "mode": "flux2_lora_image",
+            "prompt": body.prompt,
+            "checkpoint": checkpoint_path.name,
+            "width": body.width,
+            "height": body.height,
+            "created_at": datetime.now(UTC).isoformat(),
+            "current_node": None,
+            "step_value": 0,
+            "step_max": 0,
+            "nodes_finished": 0,
+            "nodes_total": 0,
+            "progress_percent": None,
+        }
+
+    return LoraImageGenerateResponse(
+        ok="prompt_id" in result,
+        checkpoint=checkpoint_path.name,
+        lora_name=lora_name,
+        prompt_id=prompt_id,
+        number=result.get("number"),
+        node_errors=result.get("node_errors"),
+    )
+
+
+@app.get("/api/lora-training/checkpoints", response_model=LoraCheckpointsResponse)
+async def lora_training_checkpoints() -> LoraCheckpointsResponse:
+    updated_at = datetime.now(UTC).isoformat()
+    checkpoints: list[LoraCheckpoint] = []
+
+    if _LORA_OUTPUT_DIR.is_dir():
+        for path in sorted(_LORA_OUTPUT_DIR.glob("*.safetensors")):
+            stat = path.stat()
+            step_match = re.search(r"_(\d{6,})\.safetensors$", path.name)
+            checkpoints.append(
+                LoraCheckpoint(
+                    name=path.name,
+                    step=int(step_match.group(1)) if step_match else None,
+                    path=str(path),
+                    size_bytes=stat.st_size,
+                    modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+                )
+            )
+
+    checkpoints.sort(key=lambda item: item.step if item.step is not None else -1)
+    return LoraCheckpointsResponse(
+        ok=True,
+        job_name=_LORA_JOB_NAME,
+        checkpoints=checkpoints,
+        count=len(checkpoints),
+        updated_at=updated_at,
+    )
 
 
 @app.get("/api/listing")

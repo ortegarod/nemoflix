@@ -57,6 +57,50 @@ def build_wan22_t2v(
     }
 
 
+def build_flux2_lora_image(
+    *,
+    prompt: str,
+    lora_name: str,
+    width: int = 1024,
+    height: int = 1024,
+    seed: int | None = None,
+    filename_prefix: str = "nemoflix-amd/flux2-lora",
+    steps: int = 20,
+    cfg: float = 4.0,
+    sampler: str = "euler",
+    guidance: float = 4.0,
+    unet: str = "flux2_dev_fp8mixed.safetensors",
+    clip: str = "mistral_3_small_flux2_bf16.safetensors",
+    vae: str = "flux2-vae.safetensors",
+    lora_strength: float = 1.0,
+) -> dict:
+    """Build native ComfyUI API-format JSON for FLUX.2 text-to-image with a LoRA.
+
+    Reference workflow: ComfyUI workflow-templates `templates-all_in_one-image_edit_models.json`,
+    FLUX.2 dev subgraph (`UNETLoader` + `CLIPLoader type=flux2` + `Flux2Scheduler`
+    + `SamplerCustomAdvanced`).
+    """
+
+    noise_seed = _seed(seed)
+    return {
+        "12": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
+        "38": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip, "type": "flux2", "device": "default"}},
+        "10": {"class_type": "VAELoader", "inputs": {"vae_name": vae}},
+        "50": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["12", 0], "lora_name": lora_name, "strength_model": lora_strength}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["38", 0]}},
+        "26": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["6", 0], "guidance": guidance}},
+        "22": {"class_type": "BasicGuider", "inputs": {"model": ["50", 0], "conditioning": ["26", 0]}},
+        "25": {"class_type": "RandomNoise", "inputs": {"noise_seed": noise_seed}},
+        "16": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": sampler}},
+        "48": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": width, "height": height}},
+        "47": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "13": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["25", 0], "guider": ["22", 0], "sampler": ["16", 0], "sigmas": ["48", 0], "latent_image": ["47", 0]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["13", 0], "vae": ["10", 0]}},
+        "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": filename_prefix}},
+    }
+
+
+
 def build_wan22_i2v(
     *,
     image: str,
