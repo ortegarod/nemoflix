@@ -18,7 +18,10 @@ AI_TOOLKIT_REF="${AI_TOOLKIT_REF:-main}"
 INSTALL_UI_DEPS="${INSTALL_UI_DEPS:-0}"
 PYTHON_BIN="$TOOLKIT_VENV/bin/python"
 export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
+# Do not let Ubuntu's needrestart apt hook bounce services while we are connected
+# over SSH. The AMD images default to automatic restarts; list-only keeps the
+# installer non-interactive without touching sshd/network services mid-run.
+export NEEDRESTART_MODE=l
 
 trap 'echo "ERROR: AI Toolkit install failed at line $LINENO"' ERR
 
