@@ -32,7 +32,7 @@ interface AppSidebarProps {
 export function AppSidebar({ activeTab, onTabChange, onClose, checkpoints, onQueued, onSelectCharacter, projectMode }: AppSidebarProps) {
   const topTabs: { id: SidebarTab; icon: React.ReactNode; label: string; visible: boolean }[] = [
     { id: "generate", icon: <Image className="w-4 h-4" />, label: "Generate", visible: true },
-    { id: "characters", icon: <Users className="w-4 h-4" />, label: "Characters", visible: true },
+    { id: "characters", icon: <Users className="w-4 h-4" />, label: "Characters & LoRA Training", visible: true },
     { id: "agents", icon: <Bot className="w-4 h-4" />, label: "Agents", visible: true },
     { id: "projects", icon: <Film className="w-4 h-4" />, label: "Projects", visible: true },
     { id: "guide", icon: <BookOpen className="w-4 h-4" />, label: "Guide", visible: true },
@@ -108,7 +108,7 @@ export function AppSidebar({ activeTab, onTabChange, onClose, checkpoints, onQue
           {activeTab === "characters" && <CharactersTab onSelectCharacter={onSelectCharacter} />}
           {activeTab === "generate" && <GenerateTab checkpoints={checkpoints} onQueued={onQueued} />}
           {activeTab === "agents" && <AgentsTab />}
-          {activeTab === "projects" && (projectMode ? <ProjectSidebar data={projectMode} /> : <ProjectsGuide compact />)}
+          {activeTab === "projects" && (projectMode ? <ProjectSidebar data={projectMode} onDeleteScene={(id) => projectMode.onDeleteScene(id)} /> : <ProjectsGuide compact />)}
           {activeTab === "guide" && <GuideTab />}
           {activeTab === "info" && <PlaceholderTab title="Info" body="Select media to inspect generated outputs, prompts, and metadata." />}
           {activeTab === "nodes" && <NodesTab />}
@@ -134,18 +134,17 @@ function CharactersTab({ onSelectCharacter }: { onSelectCharacter?: (characterId
   }, []);
 
   return (
-    <div className="h-full overflow-y-auto p-4 space-y-4">
+      <div className="h-full overflow-y-auto p-4 space-y-4">
+      {/* Character cards first — your owned assets */}
       <div className="rounded-xl border border-gray-800/60 bg-gray-900/30 p-3 space-y-2">
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs font-semibold text-gray-300">Your character assets</p>
           <span className="text-[10px] uppercase tracking-wider text-emerald-300/80 border border-emerald-500/20 bg-emerald-500/5 rounded-full px-2 py-0.5">Owned</span>
         </div>
         <p className="text-[11px] text-gray-500 leading-relaxed">
-          These are characters you created or own the rights to use. Later, imported, licensed, purchased, or community characters can live here too, with their ownership status clearly marked.
+          These are characters you created or own the rights to use. Each one is backed by a fine-tuned LoRA trained on AMD MI300X.
         </p>
       </div>
-
-      <CreateCharacterWorkflow />
 
       {loading && <p className="text-xs text-gray-500 py-2">Loading...</p>}
       {error && <p className="text-xs text-red-400 py-2">{error}</p>}
@@ -206,6 +205,9 @@ function CharactersTab({ onSelectCharacter }: { onSelectCharacter?: (characterId
         );
       })}
 
+      {/* Training workflow below the character card */}
+      <CreateCharacterWorkflow />
+
       <div className="pt-2 border-t border-gray-800/40">
         <a
           href="#"
@@ -226,13 +228,23 @@ function CreateCharacterWorkflow() {
     <div className="rounded-2xl border border-rose-600/20 bg-gradient-to-b from-rose-950/10 to-gray-950 p-4 space-y-4">
       <div className="flex items-center gap-2">
         <Box className="w-4 h-4 text-rose-400" />
-        <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">Create a Character</span>
+        <span className="text-xs font-semibold text-rose-300 uppercase tracking-wider">LoRA Fine-tuning</span>
         <span className="text-[10px] uppercase tracking-wider text-amber-300/80 border border-amber-500/20 bg-amber-500/5 rounded-full px-2 py-0.5 ml-auto">AMD MI300X</span>
       </div>
 
       <p className="text-xs text-gray-300 leading-relaxed">
-        Characters are reusable identity assets powered by fine-tuned LoRAs. Once you create one, your AI agent can use it in any project — consistent face, consistent look, every time.
+        <strong className="text-rose-200">Train your own character LoRA in ~90 minutes on AMD MI300X.</strong> Once fine-tuned, your AI agent can generate consistent images and videos with your face — every single time.
       </p>
+
+      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+        <p className="text-[11px] font-semibold text-amber-300 flex items-center gap-1.5 mb-1">
+          <Cpu className="w-3.5 h-3.5" />
+          AMD MI300X — 192 GB VRAM
+        </p>
+        <p className="text-[11px] text-amber-200/70 leading-relaxed">
+          Fine-tuning runs on AMD's flagship GPU via ROCm. No CUDA required. Train a Flux2 LoRA in ~90 minutes, then generate images and videos immediately.
+        </p>
+      </div>
 
       <div className="rounded-xl border border-gray-700/40 bg-gray-900/40 p-3">
         <p className="text-[11px] font-semibold text-gray-300 flex items-center gap-1.5 mb-2">
@@ -240,17 +252,17 @@ function CreateCharacterWorkflow() {
           Tell your AI agent:
         </p>
         <p className="text-[11px] text-gray-400 leading-relaxed">
-          "Create a character for me. Upload my reference images, register the character, start a LoRA fine-tune, and let me know when it's ready to use."
+          "Create a character for me. Upload my reference images, register the character, start a LoRA fine-tune on AMD MI300X, and let me know when it's ready to use."
         </p>
       </div>
 
       <div className="space-y-2.5">
-        <p className="text-[11px] font-medium text-gray-400">What your agent will do:</p>
+        <p className="text-[11px] font-medium text-gray-400">How it works:</p>
         {[
-          { n: 1, title: "Upload your images", body: "5-20 reference photos. Different angles and lighting work best. One good photo is enough to start — your agent can generate variations to build a dataset." },
+          { n: 1, title: "Upload your images", body: "5-20 reference photos. Different angles and lighting work best. Your agent can even generate variations to build a dataset." },
           { n: 2, title: "Register your character", body: "A character record with a unique trigger word — this is how the agent references your identity in every generation." },
-          { n: 3, title: "Fine-tune on AMD MI300X", body: "Training a LoRA on 192 GB MI300X VRAM. Takes about 30 minutes. Your agent monitors progress and notifies you when it's done.", highlight: true },
-          { n: 4, title: "Ready to use", body: 'Your character appears in the registry. From then on, just say "generate a shot with [character name] doing X" — your agent handles the rest.' },
+          { n: 3, title: "Fine-tune on AMD MI300X", body: "Training a Flux2 LoRA on 192 GB MI300X VRAM via ROCm. Takes about 90 minutes. Your agent monitors progress and notifies you when done.", highlight: true },
+          { n: 4, title: "Generate consistently", body: 'Your character appears in the registry. From then on, just say "generate a shot with [character name] doing X" — your agent handles the rest.' },
         ].map((step) => (
           <div key={step.n} className="flex gap-2.5">
             <div className={`flex-shrink-0 w-5 h-5 rounded-md flex items-center justify-center mt-0.5 ${step.highlight ? "bg-amber-500/20" : "bg-gray-800"}`}>

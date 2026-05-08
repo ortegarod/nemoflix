@@ -281,6 +281,16 @@ async def delete_project(project_id: str) -> bool:
     return not result.endswith(" 0")
 
 
+async def delete_project_scene(project_id: str, scene_id: str) -> bool:
+    result = await get_pool().execute("DELETE FROM project_scenes WHERE project_id=$1 AND id=$2", project_id, scene_id)
+    return not result.endswith(" 0")
+
+
+async def delete_project_shot(project_id: str, scene_id: str, shot_id: str) -> bool:
+    result = await get_pool().execute("DELETE FROM project_shots WHERE project_id=$1 AND scene_id=$2 AND id=$3", project_id, scene_id, shot_id)
+    return not result.endswith(" 0")
+
+
 async def list_project_scenes(project_id: str) -> list[dict[str, Any]]:
     rows = await get_pool().fetch("SELECT * FROM project_scenes WHERE project_id=$1 ORDER BY scene_number", project_id)
     return [_scene_row(row) for row in rows]
@@ -295,11 +305,13 @@ async def upsert_project_scene(scene: dict[str, Any]) -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO project_scenes (id, project_id, scene_number, heading, summary, location, time_of_day, characters, metadata, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,NOW())
+            INSERT INTO project_scenes (id, project_id, scene_number, title, setting, weather, summary, location, time_of_day, characters, metadata, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,NOW())
             ON CONFLICT (id) DO UPDATE SET
                 scene_number=EXCLUDED.scene_number,
-                heading=EXCLUDED.heading,
+                title=EXCLUDED.title,
+                setting=EXCLUDED.setting,
+                weather=EXCLUDED.weather,
                 summary=EXCLUDED.summary,
                 location=EXCLUDED.location,
                 time_of_day=EXCLUDED.time_of_day,
@@ -311,7 +323,9 @@ async def upsert_project_scene(scene: dict[str, Any]) -> dict[str, Any]:
             scene["id"],
             scene["project_id"],
             scene["scene_number"],
-            scene.get("heading"),
+            scene.get("title"),
+            scene.get("setting"),
+            scene.get("weather"),
             scene.get("summary"),
             scene.get("location"),
             scene.get("time_of_day"),
@@ -404,14 +418,15 @@ async def upsert_project_shot(shot: dict[str, Any]) -> dict[str, Any]:
         row = await conn.fetchrow(
             """
             INSERT INTO project_shots (
-                id, project_id, scene_id, shot_number, text, description, voiceover, image_prompt, motion_prompt,
+                id, project_id, scene_id, shot_number, text, description, subtitle, voiceover, image_prompt, motion_prompt,
                 camera_motion, characters, duration_seconds, status, image_file, video_file,
                 image_prompt_id, video_prompt_id, metadata, updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18::jsonb,NOW())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,NOW())
             ON CONFLICT (id) DO UPDATE SET
                 shot_number=EXCLUDED.shot_number,
                 text=EXCLUDED.text,
                 description=EXCLUDED.description,
+                subtitle=EXCLUDED.subtitle,
                 voiceover=EXCLUDED.voiceover,
                 image_prompt=EXCLUDED.image_prompt,
                 motion_prompt=EXCLUDED.motion_prompt,
@@ -419,10 +434,10 @@ async def upsert_project_shot(shot: dict[str, Any]) -> dict[str, Any]:
                 characters=EXCLUDED.characters,
                 duration_seconds=EXCLUDED.duration_seconds,
                 status=EXCLUDED.status,
-                image_file=COALESCE(EXCLUDED.image_file, project_shots.image_file),
-                video_file=COALESCE(EXCLUDED.video_file, project_shots.video_file),
-                image_prompt_id=COALESCE(EXCLUDED.image_prompt_id, project_shots.image_prompt_id),
-                video_prompt_id=COALESCE(EXCLUDED.video_prompt_id, project_shots.video_prompt_id),
+                image_file=EXCLUDED.image_file,
+                video_file=EXCLUDED.video_file,
+                image_prompt_id=EXCLUDED.image_prompt_id,
+                video_prompt_id=EXCLUDED.video_prompt_id,
                 metadata=EXCLUDED.metadata,
                 updated_at=NOW()
             RETURNING *
@@ -433,6 +448,7 @@ async def upsert_project_shot(shot: dict[str, Any]) -> dict[str, Any]:
             shot["shot_number"],
             shot.get("text"),
             shot.get("description"),
+            shot.get("subtitle"),
             shot.get("voiceover"),
             shot.get("image_prompt"),
             shot.get("motion_prompt"),

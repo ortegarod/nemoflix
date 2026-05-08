@@ -16,12 +16,12 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 import websockets
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from .comfy import ComfyClient
 from .config import ComfyNode, get_settings
-from .db import close_db, delete_character, delete_media_rows, delete_project, get_character, get_job, get_project, get_project_scene, get_project_shot, get_project_shot_version, get_project_shot_version_by_prompt, init_db, list_characters, list_jobs, list_media, list_project_scenes, list_project_shot_versions, list_project_shots, list_projects, media_count, next_shot_version_number, save_job, update_job_metadata, update_job_status, upsert_character, upsert_media, upsert_project, upsert_project_scene, upsert_project_shot, upsert_project_shot_version, utc_from_timestamp
+from .db import close_db, delete_character, delete_media_rows, delete_project, delete_project_scene, delete_project_shot, get_character, get_job, get_project, get_project_scene, get_project_shot, get_project_shot_version, get_project_shot_version_by_prompt, init_db, list_characters, list_jobs, list_media, list_project_scenes, list_project_shot_versions, list_project_shots, list_projects, media_count, next_shot_version_number, save_job, update_job_metadata, update_job_status, upsert_character, upsert_media, upsert_project, upsert_project_scene, upsert_project_shot, upsert_project_shot_version, utc_from_timestamp
 from .workflows import WAN_NEGATIVE, build_flux2_lora_image, build_wan22_i2v, build_wan22_t2v
 
 app = FastAPI(
@@ -72,7 +72,9 @@ class SceneRecord(BaseModel):
     id: str | None = None
     project_id: str | None = None
     scene_number: int = Field(ge=1)
-    heading: str | None = None
+    title: str | None = None
+    setting: str = "interior"
+    weather: str = "clear"
     summary: str | None = None
     location: str | None = None
     time_of_day: str | None = None
@@ -101,6 +103,7 @@ class ShotRecord(BaseModel):
     shot_number: int = Field(ge=1)
     text: str | None = None
     description: str | None = None
+    subtitle: str | None = None
     voiceover: str | None = None
     image_prompt: str | None = None
     motion_prompt: str | None = None
@@ -128,8 +131,8 @@ class VideoGenerateRequest(BaseModel):
     fps: int = 16
     seed: int | None = None
     filename_prefix: str = "videos"
-    steps_high: int = 10
-    steps_low: int = 10
+    steps_high: int = 2
+    steps_low: int = 2
     cfg_high: float = 3.5
     cfg_low: float = 3.5
     shift: float = 5.0
@@ -329,11 +332,12 @@ async def _comfy_ws_bridge() -> None:
                         })
                     elif msg_type == "execution_success" and isinstance(prompt_id, str):
                         await update_job_metadata(prompt_id, {"progress_percent": 100})
-                        await update_job_status(prompt_id, "completed")
-                        with contextlib.suppress(Exception):
+                        try:
                             history = await comfy().get(f"/history/{prompt_id}")
                             outputs = _extract_outputs(history, comfy())
                             await _persist_outputs(prompt_id, outputs)
+                        except Exception:
+                            pass
                     elif msg_type in {"execution_error", "execution_interrupted"} and isinstance(prompt_id, str):
                         error = data.get("exception_message") or msg_type
                         await update_job_status(prompt_id, "failed", error=error)
@@ -369,7 +373,7 @@ async def _seed_builtin_characters() -> None:
         return
     await upsert_character({
         "id": "rigo",
-        "name": "Rodrigo (NemoFlix Founder)",
+        "name": "Rodrigo (NemoFlix)",
         "kind": "human",
         "trigger": "Rigo",
         "source_images": ["images/rigo-lora-api-test_00001_.png"],
@@ -611,13 +615,21 @@ async def patch_project_scene(project_id: str, scene_id: str, patch: dict[str, A
     current = await get_project_scene(project_id, scene_id)
     if not current:
         raise HTTPException(status_code=404, detail="Scene not found")
-    allowed = {"scene_number", "heading", "summary", "location", "time_of_day", "characters", "metadata"}
+    allowed = {"scene_number", "title", "setting", "weather", "summary", "location", "time_of_day", "characters", "metadata"}
     unknown = sorted(set(patch) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unsupported scene fields: {', '.join(unknown)}")
     current.update(patch)
     saved = await upsert_project_scene(current)
     return SceneRecord(**saved)
+
+
+@app.delete("/api/projects/{project_id}/scenes/{scene_id}")
+async def remove_project_scene(project_id: str, scene_id: str) -> dict[str, Any]:
+    deleted = await delete_project_scene(project_id, scene_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    return {"ok": True, "id": scene_id}
 
 
 @app.get("/api/projects/{project_id}/scenes/{scene_id}/shots/{shot_id}/versions")
@@ -639,7 +651,7 @@ async def select_project_shot_version(project_id: str, scene_id: str, shot_id: s
     if version.get("status") != "completed" or not version.get("file"):
         raise HTTPException(status_code=400, detail="Only completed versions with files can be selected")
     if version.get("kind") == "image":
-        shot.update({"image_file": version["file"], "status": "image_ready"})
+        shot.update({"image_file": version["file"], "status": "image_ready", "video_file": None, "video_prompt_id": None})
     else:
         shot.update({"video_file": version["file"], "status": "video_ready"})
     saved = await upsert_project_shot(shot)
@@ -668,13 +680,25 @@ async def patch_project_shot(project_id: str, scene_id: str, shot_id: str, patch
     current = await get_project_shot(project_id, scene_id, shot_id)
     if not current:
         raise HTTPException(status_code=404, detail="Shot not found")
-    allowed = {"shot_number", "text", "description", "voiceover", "image_prompt", "motion_prompt", "camera_motion", "characters", "duration_seconds", "status", "image_file", "video_file", "image_prompt_id", "video_prompt_id", "metadata"}
+    allowed = {"shot_number", "text", "description", "subtitle", "voiceover", "image_prompt", "motion_prompt", "camera_motion", "characters", "duration_seconds", "status", "image_file", "video_file", "image_prompt_id", "video_prompt_id", "metadata"}
     unknown = sorted(set(patch) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unsupported shot fields: {', '.join(unknown)}")
     current.update(patch)
     saved = await upsert_project_shot(current)
     return ShotRecord(**saved)
+
+
+@app.delete("/api/projects/{project_id}/scenes/{scene_id}/shots/{shot_id}")
+async def remove_project_shot(project_id: str, scene_id: str, shot_id: str) -> dict[str, Any]:
+    deleted = await delete_project_shot(project_id, scene_id, shot_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Shot not found")
+    return {"ok": True, "id": shot_id}
+
+
+def _wan_resolution(aspect_ratio: str | None) -> tuple[int, int]:
+    return {"9:16": (720, 1280), "1:1": (1024, 1024)}.get(aspect_ratio or "", (1280, 720))
 
 
 def _character_bindings_from_ids(ids: list[str]) -> list[CharacterBinding]:
@@ -696,6 +720,8 @@ async def generate_project_shot_image(project_id: str, scene_id: str, shot_id: s
     shot = await get_project_shot(project_id, scene_id, shot_id)
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
+    if shot.get("status") in {"rendering_image", "animating"}:
+        raise HTTPException(status_code=409, detail="Shot is already rendering")
     prompt = shot.get("description") or shot.get("image_prompt") or shot.get("text")
     if not prompt:
         raise HTTPException(status_code=400, detail="Shot description, image_prompt, or text is required")
@@ -757,6 +783,8 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
     shot = await get_project_shot(project_id, scene_id, shot_id)
     if not shot:
         raise HTTPException(status_code=404, detail="Shot not found")
+    if shot.get("status") in {"rendering_image", "animating"}:
+        raise HTTPException(status_code=409, detail="Shot is already rendering")
     prompt = shot.get("motion_prompt") or shot.get("text") or shot.get("image_prompt")
     if not prompt:
         raise HTTPException(status_code=400, detail="Shot motion_prompt, text, or image_prompt is required")
@@ -774,14 +802,17 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
         raise HTTPException(status_code=400, detail="Shot image_file or character reference image is required")
     comfy_image = await _ensure_comfy_input_image(image)
 
+    project = await get_project(project_id)
+    width, height = _wan_resolution(project.get("aspect_ratio") if project else None)
+
     wan_loras = _character_loras(records, "wan22_i2v", bindings)
     version_number = await next_shot_version_number(shot_id, "video")
     version_id = _new_id("ver")
     workflow = build_wan22_i2v(
         image=comfy_image,
         prompt=resolved_prompt,
-        width=1024,
-        height=1024,
+        width=width,
+        height=height,
         length=max(1, int(shot.get("duration_seconds") or 5) * 16),
         fps=16,
         filename_prefix=f"projects/{project_id}/scene-{shot.get('shot_number', 1):02d}-{shot_id}-video-v{version_number:02d}",
@@ -817,13 +848,158 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
             job_type="project_video",
             status="pending",
             prompt=resolved_prompt,
-            width=1024,
-            height=1024,
+            width=width,
+            height=height,
             workflow_json=workflow,
             metadata={"project_id": project_id, "scene_id": scene_id, "shot_id": shot_id, "version_id": version_id, "output_role": "video", "source_image": image, "character_ids": character_ids, "resolved_loras": wan_loras},
         )
 
     return VideoGenerateResponse(ok="prompt_id" in result, mode="i2v", prompt_id=prompt_id, number=result.get("number"), node_errors=result.get("node_errors"))
+
+
+def _srt_timestamp(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int((seconds % 1) * 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+async def _set_render_status(project_id: str, status: str, error: str | None = None, final_video: str | None = None) -> None:
+    project = await get_project(project_id)
+    if not project:
+        return
+    meta = dict(project.get("metadata") or {})
+    meta["render_status"] = status
+    if error is not None:
+        meta["render_error"] = error
+    if final_video is not None:
+        meta["final_video"] = final_video
+    project["metadata"] = meta
+    await upsert_project(project)
+
+
+async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: str) -> None:
+    out_path = (_OUTPUT_DIR / f"projects/{project_id}/render-{render_id}.mp4").resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    clip_pairs: list[tuple[Path, dict[str, Any]]] = []
+    for shot in shots:
+        p = (_OUTPUT_DIR / shot["video_file"]).resolve()
+        if not p.is_file():
+            await _set_render_status(project_id, "failed", f"Missing clip for shot {shot['id']}: {shot['video_file']}")
+            return
+        clip_pairs.append((p, shot))
+
+    concat_tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, prefix="nemo_concat_")
+    try:
+        for p, _ in clip_pairs:
+            concat_tmp.write(f"file '{p}'\n")
+        concat_tmp.flush()
+        concat_path = concat_tmp.name
+    finally:
+        concat_tmp.close()
+
+    srt_path: str | None = None
+    srt_entries: list[str] = []
+    cumulative = 0.0
+    for idx, (_, shot) in enumerate(clip_pairs, start=1):
+        duration = float(shot.get("duration_seconds") or 5)
+        subtitle = (shot.get("subtitle") or "").strip()
+        if subtitle:
+            srt_entries.append(
+                f"{idx}\n{_srt_timestamp(cumulative)} --> {_srt_timestamp(cumulative + duration)}\n{subtitle}\n"
+            )
+        cumulative += duration
+
+    if srt_entries:
+        srt_tmp = tempfile.NamedTemporaryFile("w", suffix=".srt", delete=False, prefix="nemo_srt_")
+        try:
+            srt_tmp.write("\n".join(srt_entries))
+            srt_tmp.flush()
+            srt_path = srt_tmp.name
+        finally:
+            srt_tmp.close()
+
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path]
+    if srt_path:
+        style = "FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2"
+        cmd += ["-vf", f"subtitles={srt_path}:force_style='{style}'", "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+    else:
+        cmd += ["-c:v", "copy"]
+    cmd += ["-an", str(out_path)]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+
+    Path(concat_path).unlink(missing_ok=True)
+    if srt_path:
+        Path(srt_path).unlink(missing_ok=True)
+
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace")[-800:]
+        await _set_render_status(project_id, "failed", err)
+        return
+
+    stat = out_path.stat()
+    rel = str(out_path.relative_to(_OUTPUT_DIR))
+    await upsert_media({
+        "filename": rel,
+        "type": "video",
+        "size": stat.st_size,
+        "workflow_type": "project_render",
+        "prompt": project_id,
+    })
+    await _set_render_status(project_id, "completed", final_video=rel)
+
+
+@app.post("/api/projects/{project_id}/render")
+async def render_project(project_id: str, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    project = await get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    scenes = await list_project_scenes(project_id)
+    ordered_shots: list[dict[str, Any]] = []
+    for scene in scenes:
+        shots = await list_project_shots(project_id, scene["id"])
+        ordered_shots.extend(shots)
+
+    if not ordered_shots:
+        raise HTTPException(status_code=400, detail="Project has no shots")
+
+    missing = [s["id"] for s in ordered_shots if not s.get("video_file")]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Shots missing video: {missing}")
+
+    render_id = _new_id("rnd")
+    meta = dict(project.get("metadata") or {})
+    meta.update({"render_status": "rendering", "render_id": render_id, "render_error": None, "final_video": None})
+    project["metadata"] = meta
+    await upsert_project(project)
+
+    background_tasks.add_task(_run_render, project_id, ordered_shots, render_id)
+    return {"ok": True, "render_id": render_id, "shot_count": len(ordered_shots)}
+
+
+@app.get("/api/projects/{project_id}/render")
+async def render_project_status(project_id: str) -> dict[str, Any]:
+    project = await get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    meta = project.get("metadata") or {}
+    final_video = meta.get("final_video")
+    return {
+        "status": meta.get("render_status", "none"),
+        "render_id": meta.get("render_id"),
+        "final_video": final_video,
+        "final_video_url": f"/media/{final_video}" if final_video else None,
+        "render_error": meta.get("render_error"),
+    }
 
 
 @app.get("/api/health")
@@ -897,7 +1073,7 @@ async def nodes() -> dict[str, Any]:
 @app.get("/api/comfy/{path:path}")
 async def comfy_get(path: str) -> Any:
     """Read-only passthrough for Comfy discovery endpoints: models, queue, object_info, history, etc."""
-    allowed_roots = ("system_stats", "object_info", "models", "queue", "history", "prompt", "features")
+    allowed_roots = ("system_stats", "object_info", "models", "queue", "history", "prompt", "features", "view")
     if not path.startswith(allowed_roots):
         raise HTTPException(status_code=403, detail="Only read-only Comfy discovery/status paths are exposed here")
     return await comfy().get(f"/{path}")
@@ -1121,7 +1297,7 @@ async def _persist_outputs(prompt_id: str, outputs: list[JobOutput]) -> None:
             shot = await get_project_shot(project_id, scene_id, shot_id)
             if shot:
                 if output_role == "image":
-                    shot.update({"image_file": first_filename, "status": "image_ready"})
+                    shot.update({"image_file": first_filename, "status": "image_ready", "video_file": None, "video_prompt_id": None})
                 else:
                     shot.update({"video_file": first_filename, "status": "video_ready"})
                 await upsert_project_shot(shot)
@@ -1496,9 +1672,6 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
         checkpoint_lora_name = _comfy_lora_name_for_checkpoint(checkpoint_path)
         loras.insert(0, {"name": checkpoint_lora_name, "strength": body.lora_strength, "checkpoint": checkpoint_name})
 
-    if not loras:
-        raise HTTPException(status_code=400, detail="No LoRA resolved. Supply checkpoint or character with a LoRA for this workflow.")
-
     graph = build_flux2_lora_image(
         prompt=prompt,
         loras=loras,
@@ -1516,8 +1689,10 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
         lora_strength=body.lora_strength,
     )
 
+    resolved_lora_name = checkpoint_lora_name or (loras[0].get("name") if loras else None)
+
     if not body.submit:
-        return ImageGenerateResponse(ok=True, workflow=body.workflow, checkpoint=checkpoint_name, lora_name=checkpoint_lora_name or loras[0].get("name"), graph=graph)
+        return ImageGenerateResponse(ok=True, workflow=body.workflow, checkpoint=checkpoint_name, lora_name=resolved_lora_name, graph=graph)
 
     try:
         image_client, image_node = comfy_for_role("image")
@@ -1542,7 +1717,7 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
         ok="prompt_id" in result,
         workflow=body.workflow,
         checkpoint=checkpoint_name,
-        lora_name=checkpoint_lora_name or loras[0].get("name"),
+        lora_name=resolved_lora_name,
         prompt_id=prompt_id,
         number=result.get("number"),
         node_errors=result.get("node_errors"),

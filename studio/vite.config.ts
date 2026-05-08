@@ -10,6 +10,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: "0.0.0.0",
       port: 3010,
+      historyApiFallback: true,
       proxy: {
         "/api": { target: apiTarget, changeOrigin: true },
         "/media": { target: apiTarget, changeOrigin: true },

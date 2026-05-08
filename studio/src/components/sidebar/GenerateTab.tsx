@@ -26,7 +26,7 @@ interface CharacterSummary {
 }
 
 const DEFAULT_IMAGE_PROMPT =
-  "cinematic portrait, confident subject, dramatic soft light, realistic skin texture, sharp face detail, high-end editorial photography";
+  "Rigo, portrait in a sleek AI media studio, leaning one hand on a workstation beside glowing video timeline screens, calm confident expression, modern editorial photography, warm cinematic key light, 85mm lens, shallow depth of field, realistic skin texture and sharp facial detail.";
 const DEFAULT_VIDEO_PROMPT =
   "cinematic motion, dramatic camera movement, atmospheric lighting, dynamic composition, polished short-form video style";
 
@@ -58,7 +58,7 @@ export function GenerateTab({ checkpoints, onQueued }: GenerateTabProps) {
   const [mode, setMode] = useState<GenerateMode>("image");
   const [characters, setCharacters] = useState<CharacterSummary[]>([]);
   const [characterId, setCharacterId] = useState("none");
-  const [checkpoint, setCheckpoint] = useState("latest");
+  const [checkpoint, setCheckpoint] = useState("base");
   const [prompt, setPrompt] = useState(DEFAULT_IMAGE_PROMPT);
   const [sourceImage, setSourceImage] = useState("");
   const [width, setWidth] = useState(1248);
@@ -106,11 +106,12 @@ export function GenerateTab({ checkpoints, onQueued }: GenerateTabProps) {
       const filenamePrefix = outputPrefix(mode, cleanPrompt);
       const endpoint = mode === "image" ? "/api/image/generate" : "/api/video/generate";
       const useCharacter = characterId !== "none";
+      const useCheckpoint = !useCharacter && checkpoint !== "base";
       const body = mode === "image"
         ? {
             workflow: "flux2_lora",
             character: useCharacter ? characterId : undefined,
-            checkpoint: useCharacter ? undefined : (checkpoint || latestCheckpoint),
+            checkpoint: useCheckpoint ? (checkpoint || latestCheckpoint) : undefined,
             prompt: cleanPrompt,
             width,
             height,
@@ -229,6 +230,7 @@ export function GenerateTab({ checkpoints, onQueued }: GenerateTabProps) {
             onChange={(event) => setCheckpoint(event.target.value)}
             className="w-full rounded-lg bg-gray-950 border border-gray-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-rose-600"
           >
+            <option value="base">Base Flux2 model — no LoRA</option>
             <option value="latest">Latest available LoRA checkpoint</option>
             {checkpoints.map((item) => (
               <option key={item.name} value={item.name}>
@@ -237,7 +239,7 @@ export function GenerateTab({ checkpoints, onQueued }: GenerateTabProps) {
             ))}
           </select>
           <p className="text-[10px] text-gray-600 leading-relaxed">
-            Raw image mode bypasses character selection and uses the checkpoint directly.
+            Raw image mode bypasses character selection. Use base Flux2 or optionally apply a LoRA checkpoint directly.
           </p>
         </label>
       )}

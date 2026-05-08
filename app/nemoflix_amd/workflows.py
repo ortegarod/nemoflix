@@ -25,8 +25,8 @@ def build_wan22_t2v(
     fps: int = 16,
     seed: int | None = None,
     filename_prefix: str = "videos/generated",
-    steps_high: int = 10,
-    steps_low: int = 10,
+    steps_high: int = 2,
+    steps_low: int = 2,
     cfg_high: float = 3.5,
     cfg_low: float = 3.5,
     shift: float = 5.0,
@@ -130,8 +130,8 @@ def build_wan22_i2v(
     fps: int = 16,
     seed: int | None = None,
     filename_prefix: str = "videos/generated",
-    steps_high: int = 10,
-    steps_low: int = 10,
+    steps_high: int = 2,
+    steps_low: int = 2,
     cfg_high: float = 3.5,
     cfg_low: float = 3.5,
     shift: float = 5.0,
@@ -141,6 +141,8 @@ def build_wan22_i2v(
     low_model: str = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
     vae: str = "wan_2.1_vae.safetensors",
     clip: str = "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    lightx2v_high: str | None = "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+    lightx2v_low: str | None = "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors",
     high_lora: str | None = None,
     low_lora: str | None = None,
     high_lora_strength: float = 1.0,
@@ -162,6 +164,14 @@ def build_wan22_i2v(
         "62": {"class_type": "LoadImage", "inputs": {"image": image}},
         "63": {"class_type": "WanImageToVideo", "inputs": {"positive": ["6", 0], "negative": ["7", 0], "vae": ["39", 0], "start_image": ["62", 0], "width": width, "height": height, "length": length, "batch_size": 1}},
     }
+    # LightX2V 4-step speed LoRAs — applied first to base model before character LoRAs
+    if lightx2v_high:
+        workflow["83"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": high_model_ref, "lora_name": lightx2v_high, "strength_model": 1.0}}
+        high_model_ref = ["83", 0]
+    if lightx2v_low:
+        workflow["84"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": low_model_ref, "lora_name": lightx2v_low, "strength_model": 1.0}}
+        low_model_ref = ["84", 0]
+    # Character LoRAs — chained on top of LightX2V
     if high_lora:
         workflow["80"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": high_model_ref, "lora_name": high_lora, "strength_model": high_lora_strength}}
         high_model_ref = ["80", 0]

@@ -1,15 +1,16 @@
-import { Plus, Sparkles, UserCircle, Clapperboard } from "lucide-react";
+import { Plus, Sparkles, UserCircle, Clapperboard, Trash2 } from "lucide-react";
 import type { ProjectModeData } from "../../types";
 
 interface ProjectSidebarProps {
   data: ProjectModeData;
+  onDeleteScene: (sceneId: string) => void;
 }
 
-export function ProjectSidebar({ data }: ProjectSidebarProps) {
+export function ProjectSidebar({ data, onDeleteScene }: ProjectSidebarProps) {
   const { project, scenes, shots, selectedSceneId, phase, onSelectScene, onAddScene } = data;
 
   if (scenes.length === 0) {
-    return <OutlineSidebar data={data} />;
+    return <OutlineSidebar data={data} onDeleteScene={onDeleteScene} />;
   }
 
   return (
@@ -47,9 +48,16 @@ export function ProjectSidebar({ data }: ProjectSidebarProps) {
                 <div className="flex items-center gap-2 min-w-0">
                   <span className={`text-[10px] font-mono ${active ? "text-rose-300" : "text-gray-500"}`}>S{scene.scene_number}</span>
                   <span className={`text-xs font-medium truncate ${active ? "text-gray-100" : "text-gray-300"}`}>
-                    {scene.heading || "Untitled scene"}
+                    {scene.title || "Untitled scene"}
                   </span>
                 </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDeleteScene(scene.id); }}
+                  className="flex-shrink-0 p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-red-900/40 text-gray-600 hover:text-red-400 transition"
+                  title="Delete scene"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
               </div>
               {scene.summary && (
                 <p className="text-[11px] text-gray-500 leading-relaxed line-clamp-2">{scene.summary}</p>
@@ -57,7 +65,7 @@ export function ProjectSidebar({ data }: ProjectSidebarProps) {
               <div className="flex items-center gap-2 mt-2 text-[10px] text-gray-600">
                 <span>{sceneShots.length} shot{sceneShots.length === 1 ? "" : "s"}</span>
                 {generated > 0 && (
-                  <span className={phase === "remix" ? "text-violet-400/70" : "text-emerald-400/70"}>
+                  <span className={phase === "animate" ? "text-violet-400/70" : "text-emerald-400/70"}>
                     · {generated} rendered
                   </span>
                 )}

@@ -121,7 +121,7 @@ You are the director. Your human pitched the idea. Your job is to take that pitc
 2. **Draft the project record only after the request is clearly a project.** Decide a `title` and a one-line `description`. Pick `aspect_ratio`. Estimate `duration_seconds`. List which `characters` to cast. The script itself lives in the scenes and shots you'll add next.
 3. **POST `/api/projects`** — you'll get back the project `id`.
 4. **Break the script into scenes.** POST `/api/projects/{prj_id}/scenes` for each beat.
-5. **Break each scene into shots.** POST `/api/projects/{prj_id}/scenes/{scn_id}/shots` with `description`, `image_prompt`, and `motion_prompt`.
+5. **Break each scene into shots.** POST `/api/projects/{prj_id}/scenes/{scn_id}/shots` with `description`, `subtitle`, `image_prompt`, and `motion_prompt`.
 6. **Stop. Show the outline.** The Studio Projects page will refresh and your human will read the whole script. Tell them you're ready for their notes.
 7. **Iterate on the outline.** PATCH scenes and shots based on their feedback. Do not generate images yet.
 8. **Generate images** only after they approve the outline. POST `/api/projects/{prj}/scenes/{scn}/shots/{sht}/generate-image` per shot. Show each one.
@@ -149,7 +149,9 @@ You are the director. Your human pitched the idea. Your job is to take that pitc
 | Field | What you put here |
 |---|---|
 | `scene_number` | 1, 2, 3… ordering within the project. Required. |
-| `heading` | Slugline. `"INT. WORKSHOP - NIGHT"`. |
+| `title` | Scene title. Format: `"Scene {number} — {Location}"`. |
+| `setting` | `"interior"` or `"exterior"`. Required. |
+| `weather` | Weather condition: `"clear"`, `"rain"`, `"fog"`, `"snow"`, `"storm"`, etc. Required. |
 | `summary` | What happens in this scene, plain English. |
 | `location`, `time_of_day` | Useful for visual consistency across shots. |
 | `characters` | IDs of characters present in this scene. |
@@ -159,11 +161,12 @@ You are the director. Your human pitched the idea. Your job is to take that pitc
 | Field | What you put here |
 |---|---|
 | `shot_number` | Order within the scene. Required. |
-| `description` | Plain English: what's in the frame. |
+| `description` | Plain English: what's in the frame — camera framing, setting, lighting, technical direction for image generation. |
+| `subtitle` | **Viewer-facing narration** for this shot. This is the text burned onto the final video for viewers to read. Write it as first-person or third-person narrative that tells the story beat-by-beat. Distinct from `description` which is technical shot direction for the AI. |
 | `image_prompt` | The actual visual prompt you'll send to image generation. Be specific — character trigger words, lighting, lens, mood. |
 | `motion_prompt` | Camera move + motion for the animate step. "Slow push in, suit plates locking into place." |
 | `camera_motion` | Optional shorthand: `"push in"`, `"orbit"`, `"static"`, etc. |
-| `voiceover` | Optional VO line for that shot. |
+| `subtitle` | Viewer-facing narration burned onto the final video. Write as the story's narrative voice — this is what viewers read. |
 | `duration_seconds` | Clip length when animated. Default 5. |
 | `characters` | IDs of characters in this shot. |
 

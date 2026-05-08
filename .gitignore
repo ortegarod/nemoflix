@@ -32,6 +32,9 @@ venv/
 # Logs
 *.log
 
+# ComfyUI local mirror (symlinks only, not committed)
+ComfyUI/
+
 # Internal/private notes and datasets
 internal/
 training/

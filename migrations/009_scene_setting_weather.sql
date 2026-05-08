@@ -1,0 +1,2 @@
+ALTER TABLE project_scenes ADD COLUMN IF NOT EXISTS setting TEXT NOT NULL DEFAULT 'interior';
+ALTER TABLE project_scenes ADD COLUMN IF NOT EXISTS weather TEXT NOT NULL DEFAULT 'clear';

@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
-import { Film, Image as ImageIcon, Video, Wand2, Plus, Save, Layers, Sparkles, Edit3, Play, ArrowLeft } from "lucide-react";
-import type { Project, Scene, Shot, ShotVersion, ProjectPhase } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Film, Image as ImageIcon, Video, Wand2, Plus, Save, Layers, Sparkles, Edit3, Play, ArrowLeft, Trash2, Clapperboard, Loader2 } from "lucide-react";
+import type { JobItem, Project, Scene, Shot, ShotVersion, ProjectPhase } from "../types";
 
 interface ProjectDetailViewProps {
   project: Project;
   scenes: Scene[];
   shots: Shot[];
-  phase: ProjectPhase;
+  jobs: JobItem[];
   selectedSceneId: string | null;
   selectedShotId: string | null;
   onSelectScene: (id: string) => void;
   onSelectShot: (id: string | null) => void;
   onRefresh: () => Promise<void> | void;
   onBack: () => void;
+  onDeleteScene: (sceneId: string) => Promise<void> | void;
+  onDeleteShot: (shotId: string) => Promise<void> | void;
 }
 
 function mediaUrl(file: string | null | undefined): string | null {
@@ -22,13 +24,69 @@ function mediaUrl(file: string | null | undefined): string | null {
 }
 
 export function ProjectDetailView({
-  project, scenes, shots, phase,
+  project, scenes, shots, jobs,
   selectedSceneId, selectedShotId,
   onSelectScene, onSelectShot, onRefresh, onBack,
+  onDeleteScene, onDeleteShot,
 }: ProjectDetailViewProps) {
+  // Derive real phase from shot data, not prop
+  const phase = useMemo<ProjectPhase>(() => {
+    if (shots.length === 0) return "outline";
+    const anyImage = shots.some((s) => s.image_file);
+    const anyVideo = shots.some((s) => s.video_file);
+    if (anyVideo) return "animate";
+    if (anyImage) return "generate";
+    return "outline";
+  }, [shots]);
   const [versions, setVersions] = useState<ShotVersion[]>([]);
-  const [busyShotId, setBusyShotId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [renderStatus, setRenderStatus] = useState<string>(() => String(project.metadata?.render_status ?? "none"));
+  const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(() => {
+    const v = project.metadata?.final_video;
+    return typeof v === "string" ? `/media/${v}` : null;
+  });
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    setRenderStatus(String(project.metadata?.render_status ?? "none"));
+    const v = project.metadata?.final_video;
+    setFinalVideoUrl(typeof v === "string" ? `/media/${v}` : null);
+  }, [project.metadata]);
+
+  useEffect(() => {
+    if (renderStatus !== "rendering") {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      return;
+    }
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/projects/${project.id}/render`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setRenderStatus(data.status ?? "none");
+        if (data.final_video_url) setFinalVideoUrl(data.final_video_url);
+        if (data.status !== "rendering") {
+          if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+          if (data.status === "failed") setError(`Render failed: ${data.render_error ?? "unknown error"}`);
+        }
+      } catch { /* ignore */ }
+    }, 3000);
+    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  }, [project.id, renderStatus]);
+
+  async function handleRender() {
+    if (renderStatus === "rendering") return;
+    setError(null);
+    setRenderStatus("rendering");
+    try {
+      const res = await fetch(`/api/projects/${project.id}/render`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? `${res.status}`);
+    } catch (e) {
+      setRenderStatus("failed");
+      setError(e instanceof Error ? e.message : "Render failed");
+    }
+  }
 
   const selectedScene = useMemo(() => scenes.find((s) => s.id === selectedSceneId) || null, [scenes, selectedSceneId]);
   const selectedShot = useMemo(() => shots.find((s) => s.id === selectedShotId) || null, [shots, selectedShotId]);
@@ -45,10 +103,26 @@ export function ProjectDetailView({
     return () => { cancelled = true; };
   }, [project.id, selectedSceneId, selectedShotId, shots]);
 
+  const [saving, setSaving] = useState(false);
+
+  // Look up the active job for a shot by matching prompt IDs
+  function shotJob(shot: Shot): JobItem | undefined {
+    return jobs.find((j) =>
+      (shot.image_prompt_id && j.prompt_id === shot.image_prompt_id) ||
+      (shot.video_prompt_id && j.prompt_id === shot.video_prompt_id)
+    );
+  }
+
+  function isRendering(shot: Shot): boolean {
+    const job = shotJob(shot);
+    return (shot.status === 'rendering_image' || shot.status === 'animating') ||
+      (!!job && (job.status === 'pending' || job.status === 'running'));
+  }
+
   async function patchShot(shotId: string, patch: Partial<Shot>) {
     const shot = shots.find((s) => s.id === shotId);
     if (!shot) return;
-    setBusyShotId(shotId);
+    setSaving(true);
     try {
       const response = await fetch(`/api/projects/${project.id}/scenes/${shot.scene_id}/shots/${shotId}`, {
         method: "PATCH",
@@ -60,12 +134,13 @@ export function ProjectDetailView({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save shot");
     } finally {
-      setBusyShotId(null);
+      setSaving(false);
     }
   }
 
   async function addShot() {
     if (!selectedSceneId) return;
+    setSaving(true);
     const next = sceneShots.length > 0 ? Math.max(...sceneShots.map((s) => s.shot_number)) + 1 : 1;
     try {
       const response = await fetch(`/api/projects/${project.id}/scenes/${selectedSceneId}/shots`, {
@@ -79,11 +154,14 @@ export function ProjectDetailView({
       onSelectShot(created.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add shot");
+    } finally {
+      setSaving(false);
     }
   }
 
   async function generateImage(shot: Shot) {
-    setBusyShotId(shot.id);
+    if (isRendering(shot)) return;
+    setSaving(true);
     try {
       const response = await fetch(`/api/projects/${project.id}/scenes/${shot.scene_id}/shots/${shot.id}/generate-image`, { method: "POST" });
       if (!response.ok) throw new Error(`Generate failed: ${response.status}`);
@@ -91,12 +169,13 @@ export function ProjectDetailView({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to generate image");
     } finally {
-      setBusyShotId(null);
+      setSaving(false);
     }
   }
 
   async function animateShot(shot: Shot) {
-    setBusyShotId(shot.id);
+    if (isRendering(shot)) return;
+    setSaving(true);
     try {
       const response = await fetch(`/api/projects/${project.id}/scenes/${shot.scene_id}/shots/${shot.id}/animate`, { method: "POST" });
       if (!response.ok) throw new Error(`Animate failed: ${response.status}`);
@@ -104,7 +183,7 @@ export function ProjectDetailView({
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to animate");
     } finally {
-      setBusyShotId(null);
+      setSaving(false);
     }
   }
 
@@ -142,6 +221,28 @@ export function ProjectDetailView({
             <span className="rounded-full border border-gray-800 bg-gray-900/50 px-2.5 py-1 text-gray-500">{project.duration_seconds}s</span>
           )}
           <span className="rounded-full border border-gray-800 bg-gray-900/50 px-2.5 py-1 text-gray-500 uppercase tracking-wider">{project.status}</span>
+          {phase === "animate" && renderStatus !== "completed" && (
+            <button
+              onClick={handleRender}
+              disabled={renderStatus === "rendering"}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-violet-500/40 bg-violet-600/15 hover:bg-violet-600/25 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-xs font-medium text-violet-100 transition"
+            >
+              {renderStatus === "rendering"
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Rendering…</>
+                : <><Clapperboard className="w-3.5 h-3.5" /> Render final video</>
+              }
+            </button>
+          )}
+          {renderStatus === "completed" && finalVideoUrl && (
+            <a
+              href={finalVideoUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-600/15 hover:bg-emerald-600/25 px-3 py-1.5 text-xs font-medium text-emerald-100 transition"
+            >
+              <Play className="w-3.5 h-3.5" /> Watch final video
+            </a>
+          )}
         </div>
       </div>
 
@@ -156,16 +257,17 @@ export function ProjectDetailView({
                   <div className="flex items-start justify-between gap-4">
                     <div>
                       <p className="text-[11px] uppercase tracking-[0.2em] text-rose-400/70">Scene {selectedScene.scene_number}</p>
-                      <h2 className="text-2xl font-bold tracking-tight mt-1">{selectedScene.heading || "Untitled scene"}</h2>
+                      <h2 className="text-2xl font-bold tracking-tight mt-1">{selectedScene.title || "Untitled scene"}</h2>
                       {selectedScene.summary && (
                         <p className="text-sm text-gray-400 mt-2 max-w-2xl leading-relaxed">{selectedScene.summary}</p>
                       )}
                     </div>
                     <button
                       onClick={addShot}
-                      className="inline-flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-600/10 hover:bg-rose-600/20 hover:border-rose-400/50 px-3 py-1.5 text-xs font-medium text-rose-100 transition flex-shrink-0"
+                      disabled={saving}
+                      className="inline-flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-600/10 hover:bg-rose-600/20 hover:border-rose-400/50 disabled:opacity-50 px-3 py-1.5 text-xs font-medium text-rose-100 transition flex-shrink-0"
                     >
-                      <Plus className="w-3.5 h-3.5" /> Add shot
+                      <Plus className="w-3.5 h-3.5" /> {saving ? "Adding…" : "Add shot"}
                     </button>
                   </div>
 
@@ -183,10 +285,11 @@ export function ProjectDetailView({
                           shot={shot}
                           phase={phase}
                           selected={shot.id === selectedShotId}
-                          busy={busyShotId === shot.id}
+                          saving={saving}
                           onSelect={() => onSelectShot(shot.id)}
                           onGenerateImage={() => generateImage(shot)}
                           onAnimate={() => animateShot(shot)}
+                          onDeleteShot={() => onDeleteShot(shot.id)}
                         />
                       ))}
                     </div>
@@ -251,7 +354,7 @@ export function ProjectDetailView({
               <ShotEditor
                 shot={selectedShot}
                 phase={phase}
-                saving={busyShotId === selectedShot.id}
+                saving={saving}
                 onPatch={(patch) => patchShot(selectedShot.id, patch)}
                 onGenerate={() => generateImage(selectedShot)}
                 onAnimate={() => animateShot(selectedShot)}
@@ -282,9 +385,16 @@ function PhaseChip({ phase }: { phase: ProjectPhase }) {
       </span>
     );
   }
+  if (phase === "generate") {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-rose-500/40 bg-rose-600/15 px-2.5 py-1 text-rose-200">
+        <Wand2 className="w-3 h-3" /> Generate
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/40 bg-violet-600/15 px-2.5 py-1 text-violet-200">
-      <Sparkles className="w-3 h-3" /> Remix
+      <Play className="w-3 h-3" /> Animate
     </span>
   );
 }
@@ -301,19 +411,144 @@ function OutlineCenter({ project }: { project: Project }) {
   );
 }
 
+function RemixCenter({ project, shots }: { project: Project; shots: Shot[] }) {
+  const imageCount = shots.filter((s) => s.image_file).length;
+  const videoCount = shots.filter((s) => s.video_file).length;
+  const totalShots = shots.length;
+
+  return (
+    <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/10 to-gray-950 p-8 text-center max-w-2xl mx-auto space-y-5">
+      <div className="flex items-center justify-center gap-2">
+        <Sparkles className="w-6 h-6 text-violet-400" />
+        <p className="text-lg font-semibold text-violet-200">Remix Phase</p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-[11px]">
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Images</p>
+          <p className="text-violet-300 mt-0.5 font-mono text-sm">{imageCount}/{totalShots}</p>
+        </div>
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Videos</p>
+          <p className="text-violet-300 mt-0.5 font-mono text-sm">{videoCount}/{totalShots}</p>
+        </div>
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Status</p>
+          <p className="text-violet-300 mt-0.5 font-mono text-sm">{project.status}</p>
+        </div>
+      </div>
+
+      <div className="space-y-3 text-left">
+        <p className="text-xs text-gray-300 leading-relaxed">
+          <strong className="text-violet-200">Remixing is editing.</strong> Change any prompt, hit regenerate, and iterate until it lands. Your agent can also edit prompts for you.
+        </p>
+
+        <div className="rounded-xl border border-gray-700/40 bg-gray-900/40 p-3 space-y-2">
+          <p className="text-[11px] font-semibold text-gray-300">How Remix works:</p>
+          {[
+            { n: 1, title: "Pick a shot", body: "Click any shot card to select it. The right panel shows its prompts." },
+            { n: 2, title: "Edit the prompt", body: "Change the image prompt or description in the right panel. Save your changes." },
+            { n: 3, title: "Regenerate", body: "Click Generate or Re-image. The API runs the new prompt on AMD MI300X and returns a fresh image." },
+            { n: 4, title: "Iterate", body: "Not quite right? Edit the prompt again and regenerate. Each run creates a new version you can compare." },
+          ].map((step) => (
+            <div key={step.n} className="flex gap-2.5">
+              <div className="flex-shrink-0 w-5 h-5 rounded-md bg-violet-500/20 flex items-center justify-center mt-0.5">
+                <span className="text-[10px] font-medium text-violet-400">{step.n}</span>
+              </div>
+              <div>
+                <p className="text-[11px] text-gray-200">{step.title}</p>
+                <p className="text-[10px] text-gray-500 leading-relaxed mt-0.5">{step.body}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <p className="text-[11px] text-gray-500 leading-relaxed">
+          <strong className="text-gray-400">API:</strong> <code className="text-gray-500">POST /api/projects/{'{projectId}'}/scenes/{'{sceneId}'}/shots/{'{shotId}'}/generate-image</code> — regenerates with the current prompt. Or ask your agent: "Remix shot 2 with a darker mood."
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AnimateCenter({ project, shots }: { project: Project; shots: Shot[] }) {
+  const imageCount = shots.filter((s) => s.image_file).length;
+  const videoCount = shots.filter((s) => s.video_file).length;
+  const totalShots = shots.length;
+
+  return (
+    <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-b from-violet-950/10 to-gray-950 p-8 text-center max-w-2xl mx-auto space-y-5">
+      <div className="flex items-center justify-center gap-2">
+        <Play className="w-6 h-6 text-violet-400" />
+        <p className="text-lg font-semibold text-violet-200">Animate Phase</p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 text-[11px]">
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Images</p>
+          <p className="text-violet-300 mt-0.5 font-mono text-sm">{imageCount}/{totalShots}</p>
+        </div>
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Videos</p>
+          <p className="text-violet-300 mt-0.5 font-mono text-sm">{videoCount}/{totalShots}</p>
+        </div>
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-3 py-2">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Status</p>
+          <p className="text-violet-300 mt-0.5 font-mono text-sm">{project.status}</p>
+        </div>
+      </div>
+
+      <div className="space-y-3 text-left">
+        <p className="text-xs text-gray-300 leading-relaxed">
+          <strong className="text-violet-200">All images are generated.</strong> Now you can animate any shot into a video clip. Pick a shot and click Animate.
+        </p>
+
+        <div className="rounded-xl border border-gray-700/40 bg-gray-900/40 p-3 space-y-2">
+          <p className="text-[11px] font-semibold text-gray-300">How Animate works:</p>
+          {[
+            { n: 1, title: "Pick a shot", body: "Click any shot card that has an image." },
+            { n: 2, title: "Click Animate", body: "The API sends the image to Wan 2.2 I2V on AMD MI300X and returns a video clip." },
+            { n: 3, title: "Iterate", body: "Don't like the video? Animate again — each run creates a new version." },
+            { n: 4, title: "Select versions", body: "The bottom strip shows all versions. Click one to make it active." },
+          ].map((step) => (
+            <div key={step.n} className="flex gap-2.5">
+              <div className="flex-shrink-0 w-5 h-5 rounded-md bg-violet-500/20 flex items-center justify-center mt-0.5">
+                <span className="text-[10px] font-medium text-violet-400">{step.n}</span>
+              </div>
+              <div>
+                <p className="text-[11px] text-gray-200">{step.title}</p>
+                <p className="text-[10px] text-gray-500 leading-relaxed mt-0.5">{step.body}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <p className="text-[11px] text-gray-500 leading-relaxed">
+          <strong className="text-gray-400">API:</strong> <code className="text-gray-500">POST /api/projects/{'{projectId}'}/scenes/{'{sceneId}'}/shots/{'{shotId}'}/animate</code> — returns <code className="text-gray-500">prompt_id</code> for tracking. Backend uses Wan 2.2 I2V on AMD MI300X.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 interface ShotCardProps {
   shot: Shot;
   phase: ProjectPhase;
   selected: boolean;
-  busy: boolean;
+  saving: boolean;
   onSelect: () => void;
   onGenerateImage: () => void;
   onAnimate: () => void;
+  onDeleteShot: () => void;
 }
 
-function ShotCard({ shot, phase, selected, busy, onSelect, onGenerateImage, onAnimate }: ShotCardProps) {
+function ShotCard({ shot, phase, selected, saving, onSelect, onGenerateImage, onAnimate, onDeleteShot }: ShotCardProps) {
   const imageUrl = mediaUrl(shot.image_file);
   const videoUrl = mediaUrl(shot.video_file);
+  const showAnimate = !!imageUrl;
+  // Only show video if there's no newer image version (re-image invalidates old video)
+  const showVideo = !!videoUrl && shot.status !== 'image_ready';
+  const rendering = shot.status === 'rendering_image' || shot.status === 'animating' || saving;
   return (
     <div
       onClick={onSelect}
@@ -344,29 +579,47 @@ function ShotCard({ shot, phase, selected, busy, onSelect, onGenerateImage, onAn
           {shot.description || <span className="italic text-gray-600">no description</span>}
         </p>
         <div className="flex items-center gap-1.5 pt-1 border-t border-gray-800/40">
-          {phase === "outline" || !imageUrl ? (
-            <button
-              onClick={(e) => { e.stopPropagation(); onGenerateImage(); }}
-              disabled={busy}
-              className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-500/30 bg-rose-600/10 hover:bg-rose-600/20 disabled:opacity-50 disabled:cursor-wait px-2 py-1 text-[11px] text-rose-100 transition"
-            >
-              <Wand2 className="w-3 h-3" /> {busy ? "Generating…" : imageUrl ? "Regenerate" : "Generate"}
-            </button>
+          {rendering ? (
+            <div className="flex-1 rounded-lg border border-amber-800/30 bg-amber-950/20 px-2 py-1 text-[11px] text-amber-400 text-center">
+              <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse mr-1.5 align-middle" />
+              {shot.status === 'animating' ? 'Animating…' : 'Generating…'}
+            </div>
+          ) : phase === "outline" || !imageUrl ? (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); onGenerateImage(); }}
+                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-500/30 bg-rose-600/10 hover:bg-rose-600/20 px-2 py-1 text-[11px] text-rose-100 transition"
+              >
+                <Wand2 className="w-3 h-3" /> {imageUrl ? "Regenerate" : "Generate"}
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onDeleteShot(); }}
+                className="rounded-lg border border-gray-800 hover:bg-red-900/40 hover:border-red-800/50 px-1.5 py-1 text-[11px] text-gray-600 hover:text-red-400 transition"
+                title="Delete shot"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            </>
           ) : (
             <>
               <button
                 onClick={(e) => { e.stopPropagation(); onGenerateImage(); }}
-                disabled={busy}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900/60 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-wait px-2 py-1 text-[11px] text-gray-300 transition"
+                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900/60 hover:bg-gray-800 px-2 py-1 text-[11px] text-gray-300 transition"
               >
                 <Wand2 className="w-3 h-3" /> Re-image
               </button>
               <button
                 onClick={(e) => { e.stopPropagation(); onAnimate(); }}
-                disabled={busy}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-violet-500/30 bg-violet-600/15 hover:bg-violet-600/25 disabled:opacity-50 disabled:cursor-wait px-2 py-1 text-[11px] text-violet-100 transition"
+                className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-violet-500/30 bg-violet-600/15 hover:bg-violet-600/25 px-2 py-1 text-[11px] text-violet-100 transition"
               >
-                <Play className="w-3 h-3" /> {busy ? "…" : "Animate"}
+                <Play className="w-3 h-3" /> Animate
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onDeleteShot(); }}
+                className="rounded-lg border border-gray-800 hover:bg-red-900/40 hover:border-red-800/50 px-1.5 py-1 text-[11px] text-gray-600 hover:text-red-400 transition"
+                title="Delete shot"
+              >
+                <Trash2 className="w-3 h-3" />
               </button>
             </>
           )}
@@ -387,6 +640,7 @@ interface ShotEditorProps {
 
 function ShotEditor({ shot, phase, saving, onPatch, onGenerate, onAnimate }: ShotEditorProps) {
   const [draft, setDraft] = useState({
+    subtitle: shot.subtitle || "",
     description: shot.description || "",
     image_prompt: shot.image_prompt || "",
     motion_prompt: shot.motion_prompt || "",
@@ -394,6 +648,7 @@ function ShotEditor({ shot, phase, saving, onPatch, onGenerate, onAnimate }: Sho
 
   useEffect(() => {
     setDraft({
+      subtitle: shot.subtitle || "",
       description: shot.description || "",
       image_prompt: shot.image_prompt || "",
       motion_prompt: shot.motion_prompt || "",
@@ -401,12 +656,23 @@ function ShotEditor({ shot, phase, saving, onPatch, onGenerate, onAnimate }: Sho
   }, [shot.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dirty =
+    draft.subtitle !== (shot.subtitle || "") ||
     draft.description !== (shot.description || "") ||
     draft.image_prompt !== (shot.image_prompt || "") ||
     draft.motion_prompt !== (shot.motion_prompt || "");
 
   return (
     <div className="space-y-4">
+      <Field label="Subtitle" hint="Viewer-facing narration. Burned onto the final video.">
+        <textarea
+          value={draft.subtitle}
+          onChange={(e) => setDraft((d) => ({ ...d, subtitle: e.target.value }))}
+          rows={2}
+          className="w-full rounded-lg bg-black/40 border border-gray-800 px-2.5 py-2 text-xs text-gray-200 focus:outline-none focus:border-rose-500/50 placeholder:text-gray-700 leading-relaxed"
+          placeholder="The screen flickers to life at precisely 8:00 AM."
+        />
+      </Field>
+
       <Field label="Description" hint="What's in the frame, plain English.">
         <textarea
           value={draft.description}
@@ -456,29 +722,34 @@ function ShotEditor({ shot, phase, saving, onPatch, onGenerate, onAnimate }: Sho
         >
           <Save className="w-3.5 h-3.5" /> {saving ? "Saving…" : dirty ? "Save changes" : "Saved"}
         </button>
-        {phase === "outline" || !shot.image_file ? (
+        {(shot.status === 'rendering_image' || shot.status === 'animating') ? (
+          <div className="rounded-xl border border-amber-800/30 bg-amber-950/20 px-3 py-2 text-xs text-amber-400 text-center font-medium">
+            <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse mr-1.5 align-middle" />
+            {shot.status === 'animating' ? 'Animating…' : 'Generating…'}
+          </div>
+        ) : phase === "outline" || !shot.image_file ? (
           <button
-            onClick={onGenerate}
+            onClick={() => { if (!saving) onGenerate(); }}
             disabled={saving}
-            className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-600/15 hover:bg-rose-600/25 disabled:opacity-50 disabled:cursor-wait px-3 py-2 text-xs font-medium text-rose-100 transition"
+            className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl border border-rose-500/40 bg-rose-600/15 hover:bg-rose-600/25 disabled:opacity-50 px-3 py-2 text-xs font-medium text-rose-100 transition"
           >
-            <Wand2 className="w-3.5 h-3.5" /> {saving ? "Generating…" : shot.image_file ? "Regenerate image" : "Generate image"}
+            <Wand2 className="w-3.5 h-3.5" /> {shot.image_file ? "Regenerate image" : "Generate image"}
           </button>
         ) : (
           <div className="grid grid-cols-2 gap-2">
             <button
-              onClick={onGenerate}
+              onClick={() => { if (!saving) onGenerate(); }}
               disabled={saving}
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-gray-700 bg-gray-900/60 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-wait px-3 py-2 text-xs font-medium text-gray-200 transition"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-gray-700 bg-gray-900/60 hover:bg-gray-800 disabled:opacity-50 px-3 py-2 text-xs font-medium text-gray-200 transition"
             >
               <Wand2 className="w-3.5 h-3.5" /> Re-image
             </button>
             <button
-              onClick={onAnimate}
+              onClick={() => { if (!saving) onAnimate(); }}
               disabled={saving}
-              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-violet-500/40 bg-violet-600/15 hover:bg-violet-600/25 disabled:opacity-50 disabled:cursor-wait px-3 py-2 text-xs font-medium text-violet-100 transition"
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-violet-500/40 bg-violet-600/15 hover:bg-violet-600/25 disabled:opacity-50 px-3 py-2 text-xs font-medium text-violet-100 transition"
             >
-              <Play className="w-3.5 h-3.5" /> {saving ? "…" : "Animate"}
+              <Play className="w-3.5 h-3.5" /> Animate
             </button>
           </div>
         )}
@@ -541,14 +812,22 @@ function SceneSummary({ scene }: { scene: Scene }) {
   return (
     <div className="space-y-3">
       <div>
-        <p className="text-[11px] font-medium text-gray-300">Heading</p>
-        <p className="text-sm text-gray-100 mt-0.5">{scene.heading || "Untitled scene"}</p>
+        <p className="text-[11px] font-medium text-gray-300">Title</p>
+        <p className="text-sm text-gray-100 mt-0.5">{scene.title || "Untitled scene"}</p>
       </div>
       <div>
         <p className="text-[11px] font-medium text-gray-300">Summary</p>
         <p className="text-xs text-gray-400 mt-0.5 leading-relaxed">{scene.summary || <span className="italic text-gray-600">no summary</span>}</p>
       </div>
       <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Setting</p>
+          <p className="text-gray-300 mt-0.5 capitalize">{scene.setting}</p>
+        </div>
+        <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5">
+          <p className="text-gray-600 text-[10px] uppercase tracking-wider">Weather</p>
+          <p className="text-gray-300 mt-0.5 capitalize">{scene.weather}</p>
+        </div>
         <div className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5">
           <p className="text-gray-600 text-[10px] uppercase tracking-wider">Location</p>
           <p className="text-gray-300 mt-0.5">{scene.location || "—"}</p>
@@ -559,7 +838,7 @@ function SceneSummary({ scene }: { scene: Scene }) {
         </div>
       </div>
       <p className="text-[11px] text-gray-600 leading-relaxed pt-2 border-t border-gray-800/40">
-        Pick a shot in the center to edit its prompts.
+        Pick a shot in the center to start editing prompts.
       </p>
     </div>
   );

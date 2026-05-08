@@ -81,7 +81,9 @@ export interface Scene {
   id: string;
   project_id: string;
   scene_number: number;
-  heading: string | null;
+  title: string | null;
+  setting: string;
+  weather: string;
   summary: string | null;
   location: string | null;
   time_of_day: string | null;
@@ -96,6 +98,7 @@ export interface Shot {
   shot_number: number;
   text: string | null;
   description: string | null;
+  subtitle: string | null;
   voiceover: string | null;
   image_prompt: string | null;
   motion_prompt: string | null;
@@ -126,7 +129,7 @@ export interface ShotVersion {
   created_at?: string;
 }
 
-export type ProjectPhase = "outline" | "remix";
+export type ProjectPhase = "outline" | "generate" | "animate";
 
 export interface ProjectModeData {
   project: Project;
@@ -140,4 +143,6 @@ export interface ProjectModeData {
   onBack: () => void;
   onRefresh: () => Promise<void> | void;
   onAddScene: () => Promise<void> | void;
+  onDeleteScene: (sceneId: string) => Promise<void> | void;
+  onDeleteShot: (shotId: string) => Promise<void> | void;
 }

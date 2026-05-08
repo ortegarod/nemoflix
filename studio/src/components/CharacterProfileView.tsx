@@ -1,7 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Edit3, Film, Image, Sparkles, UserRound } from "lucide-react";
+import { Cpu, Edit3, Film, Image, Sparkles, UserRound } from "lucide-react";
 import { MediaTile } from "./MediaTile";
 import type { MediaItem } from "../types";
+
+interface LoraEntry {
+  name: string;
+  strength: number;
+  workflow?: string;
+  base_model?: string;
+}
+
+interface Checkpoint {
+  name: string;
+  step: number | null;
+  size_bytes: number;
+  modified_at: string;
+}
+
+interface CheckpointsResponse {
+  job_name: string;
+  checkpoints: Checkpoint[];
+  count: number;
+  updated_at: string;
+}
 
 interface CharacterRecord {
   id: string;
@@ -10,7 +31,7 @@ interface CharacterRecord {
   trigger: string | null;
   description: string | null;
   source_images: string[];
-  loras: Record<string, unknown>[];
+  loras: LoraEntry[];
   defaults: Record<string, unknown>;
 }
 
@@ -41,12 +62,22 @@ export function CharacterProfileView({ characterId, items, onOpen, onDelete, onG
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"images" | "videos">("images");
+  const [checkpoints, setCheckpoints] = useState<CheckpointsResponse | null>(null);
 
   const load = useCallback(async () => {
     try {
       setError(null);
       const data = await fetchJson<{ character: CharacterRecord }>(`/api/characters/${characterId}`);
-      setCharacter(data.character || data);
+      const char: CharacterRecord = data.character || (data as unknown as CharacterRecord);
+      setCharacter(char);
+      if (char.loras.length > 0) {
+        try {
+          const ckpts = await fetchJson<CheckpointsResponse>("/api/lora-training/checkpoints");
+          setCheckpoints(ckpts);
+        } catch {
+          // checkpoints optional — don't block character render
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load character");
     } finally {
@@ -134,6 +165,77 @@ export function CharacterProfileView({ characterId, items, onOpen, onDelete, onG
           </div>
         </div>
       </section>
+
+      {character.loras.length > 0 && (
+        <section className="rounded-3xl border border-gray-800/60 bg-gray-950/40 p-5 space-y-4">
+          <div className="flex items-center gap-2">
+            <Cpu className="w-4 h-4 text-violet-400" />
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-300">Model</h2>
+          </div>
+
+          <div className="space-y-3">
+            {character.loras.map((lora, i) => {
+              const shortName = lora.name.split("/").pop() ?? lora.name;
+              return (
+                <div key={i} className="rounded-2xl border border-gray-800/60 bg-black/30 p-4 space-y-3">
+                  <p className="text-xs font-mono text-violet-300 break-all">{shortName}</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    {lora.base_model && (
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-600">Base</p>
+                        <p className="text-xs text-gray-300 mt-0.5 font-mono">{lora.base_model}</p>
+                      </div>
+                    )}
+                    {lora.workflow && (
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-600">Workflow</p>
+                        <p className="text-xs text-gray-300 mt-0.5 font-mono">{lora.workflow}</p>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-gray-600">Strength</p>
+                      <p className="text-xs text-gray-300 mt-0.5 font-mono">{lora.strength}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {checkpoints && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] uppercase tracking-wider text-gray-600">Training Checkpoints — <span className="font-mono">{checkpoints.job_name}</span></p>
+                <p className="text-[10px] text-gray-700">
+                  checked {new Date(checkpoints.updated_at).toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded-xl border border-gray-800/60 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-gray-800/60 bg-black/20">
+                      <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider text-gray-600 font-medium">Step</th>
+                      <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider text-gray-600 font-medium">File</th>
+                      <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider text-gray-600 font-medium">Size</th>
+                      <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider text-gray-600 font-medium">Date</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {checkpoints.checkpoints.map((ck, i) => (
+                      <tr key={i} className="border-b border-gray-800/40 last:border-0 hover:bg-gray-900/30">
+                        <td className="px-3 py-2 font-mono text-violet-300">{ck.step ?? "final"}</td>
+                        <td className="px-3 py-2 text-gray-400 font-mono text-[11px] break-all">{ck.name}</td>
+                        <td className="px-3 py-2 text-gray-400 text-right font-mono">{(ck.size_bytes / 1024 / 1024).toFixed(0)} MB</td>
+                        <td className="px-3 py-2 text-gray-500 text-right whitespace-nowrap">{new Date(ck.modified_at).toLocaleDateString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="space-y-4">
         <div className="flex items-center gap-2 border-b border-gray-800/60">
