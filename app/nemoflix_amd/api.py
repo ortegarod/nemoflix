@@ -227,6 +227,9 @@ class LoraTrainingStatus(BaseModel):
     gpu_util: float | None = None
     vram_percent: float | None = None
     log_path: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    total_duration_seconds: float | None = None
     updated_at: str
     error: str | None = None
 
@@ -245,6 +248,28 @@ class LoraCheckpointsResponse(BaseModel):
     checkpoints: list[LoraCheckpoint]
     count: int
     updated_at: str
+
+
+class LoraTrainingStartRequest(BaseModel):
+    job_name: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9_-]+$")
+    trigger_word: str = Field(min_length=1)
+    dataset: str = Field(min_length=1, description="Dataset folder name under training/datasets/")
+    model: Literal["flux2_dev", "flux2_klein_4b", "flux2_klein_9b", "wan22_i2v_14b", "wan22_t2v_14b"] = "flux2_dev"
+    steps: int = Field(default=1800, ge=100, le=10000)
+    lora_rank: int = Field(default=32, ge=4, le=128)
+    learning_rate: float = Field(default=1e-4, ge=1e-6, le=1e-2)
+    resolution: int = Field(default=1024, ge=512, le=2048, description="Max resolution bucket")
+    base_config: Literal["flux2_identity", "wan22_i2v_character"] = "flux2_identity"
+
+
+class LoraTrainingStartResponse(BaseModel):
+    ok: bool
+    job_name: str
+    status: str
+    config_path: str
+    log_path: str
+    output_dir: str
+    error: str | None = None
 
 
 def comfy(node: ComfyNode | None = None) -> ComfyClient:
@@ -793,7 +818,6 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
     resolved = await _resolve_characters(None, _character_bindings_from_ids(character_ids))
     bindings = [binding for binding, _ in resolved]
     records = [record for _, record in resolved]
-    resolved_prompt = _prompt_with_character_triggers(prompt, records)
 
     image = shot.get("image_file")
     if not image and resolved:
@@ -805,21 +829,18 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
     project = await get_project(project_id)
     width, height = _wan_resolution(project.get("aspect_ratio") if project else None)
 
-    wan_loras = _character_loras(records, "wan22_i2v", bindings)
+    # Wan I2V takes identity from the input image, not from a character LoRA or trigger word.
+    # Trigger injection and character LoRAs apply to image generation only.
     version_number = await next_shot_version_number(shot_id, "video")
     version_id = _new_id("ver")
     workflow = build_wan22_i2v(
         image=comfy_image,
-        prompt=resolved_prompt,
+        prompt=prompt,
         width=width,
         height=height,
         length=max(1, int(shot.get("duration_seconds") or 5) * 16),
         fps=16,
         filename_prefix=f"projects/{project_id}/scene-{shot.get('shot_number', 1):02d}-{shot_id}-video-v{version_number:02d}",
-        high_lora=wan_loras[0]["name"] if wan_loras else None,
-        low_lora=wan_loras[0]["name"] if wan_loras else None,
-        high_lora_strength=wan_loras[0]["strength"] if wan_loras else 1.0,
-        low_lora_strength=wan_loras[0]["strength"] if wan_loras else 1.0,
     )
     try:
         video_client, video_node = comfy_for_role("video")
@@ -837,9 +858,9 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
             "version_number": version_number,
             "kind": "video",
             "status": "pending",
-            "prompt": resolved_prompt,
+            "prompt": prompt,
             "prompt_id": prompt_id,
-            "metadata": {"source_image": image, "character_ids": character_ids, "resolved_loras": wan_loras},
+            "metadata": {"source_image": image, "character_ids": character_ids},
         })
         shot.update({"status": "animating", "video_prompt_id": prompt_id})
         await upsert_project_shot(shot)
@@ -847,11 +868,11 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
             prompt_id=prompt_id,
             job_type="project_video",
             status="pending",
-            prompt=resolved_prompt,
+            prompt=prompt,
             width=width,
             height=height,
             workflow_json=workflow,
-            metadata={"project_id": project_id, "scene_id": scene_id, "shot_id": shot_id, "version_id": version_id, "output_role": "video", "source_image": image, "character_ids": character_ids, "resolved_loras": wan_loras},
+            metadata={"project_id": project_id, "scene_id": scene_id, "shot_id": shot_id, "version_id": version_id, "output_role": "video", "source_image": image, "character_ids": character_ids},
         )
 
     return VideoGenerateResponse(ok="prompt_id" in result, mode="i2v", prompt_id=prompt_id, number=result.get("number"), node_errors=result.get("node_errors"))
@@ -1094,10 +1115,13 @@ async def upload_image(file: UploadFile = File(...)) -> dict[str, Any]:
 
 @app.post("/api/video/generate", response_model=VideoGenerateResponse)
 async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
+    # Character resolution only supplies a fallback reference image for i2v.
+    # Wan video takes identity from the image, so character triggers and character LoRAs
+    # are not injected here — pass body.high_lora/body.low_lora explicitly to override.
     resolved = await _resolve_characters(body.character, body.characters)
     bindings = [binding for binding, _ in resolved]
     character_records = [record for _, record in resolved]
-    prompt = _prompt_with_character_triggers(body.prompt, character_records)
+    prompt = body.prompt
 
     image = body.image
     if body.mode == "i2v" and not image and resolved:
@@ -1105,11 +1129,10 @@ async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
     if image:
         image = await _ensure_comfy_input_image(image)
 
-    wan_loras = _character_loras(character_records, "wan22_i2v", bindings)
-    high_lora = body.high_lora or (wan_loras[0]["name"] if wan_loras else None)
-    low_lora = body.low_lora or (wan_loras[0]["name"] if wan_loras else None)
-    high_lora_strength = body.high_lora_strength if body.high_lora else (wan_loras[0]["strength"] if wan_loras else body.high_lora_strength)
-    low_lora_strength = body.low_lora_strength if body.low_lora else (wan_loras[0]["strength"] if wan_loras else body.low_lora_strength)
+    high_lora = body.high_lora
+    low_lora = body.low_lora
+    high_lora_strength = body.high_lora_strength
+    low_lora_strength = body.low_lora_strength
 
     if body.mode == "i2v":
         if not image:
@@ -1178,7 +1201,7 @@ async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
             width=body.width,
             height=body.height,
             workflow_json=workflow,
-            metadata={**body.model_dump(), "resolved_prompt": prompt, "resolved_image": image, "character_ids": [record.get("id") for record in character_records], "resolved_loras": wan_loras},
+            metadata={**body.model_dump(), "resolved_image": image, "character_ids": [record.get("id") for record in character_records]},
         )
     return VideoGenerateResponse(
         ok="prompt_id" in result,
@@ -1427,6 +1450,9 @@ async def job(prompt_id: str) -> JobStatusResponse:
 
 
 import os
+
+import yaml
+
 from fastapi.responses import FileResponse
 
 _OUTPUT_DIR = Path(get_settings().output_dir)
@@ -1435,6 +1461,89 @@ _LORA_TRAINING_LOG = Path(os.environ.get("NEMOFLIX_LORA_TRAINING_LOG", "/root/ri
 _LORA_JOB_NAME = os.environ.get("NEMOFLIX_LORA_JOB_NAME", "rigo_flux2_lora_v1_dop")
 _LORA_OUTPUT_DIR = Path(os.environ.get("NEMOFLIX_LORA_OUTPUT_DIR", f"/root/nemoflix-training/output/{_LORA_JOB_NAME}"))
 _COMFY_LORA_DIR = Path(os.environ.get("NEMOFLIX_COMFY_LORA_DIR", "/root/ComfyUI/models/loras/nemoflix-amd"))
+_TRAINING_RUNNER = Path(os.environ.get("NEMOFLIX_TRAINING_RUNNER", "/root/nemoflix-training/run-ai-toolkit.sh"))
+_TRAINING_CONFIG_DIR = Path(os.environ.get("NEMOFLIX_TRAINING_CONFIG_DIR", "/root/nemoflix-training/config"))
+_TRAINING_DIR = Path(os.environ.get("NEMOFLIX_TRAINING_DIR", "/root/nemoflix-training"))
+_ACTIVE_JOB_PATH = Path(os.environ.get("NEMOFLIX_ACTIVE_JOB_PATH", "/tmp/nemoflix-active-training-job.json"))
+
+
+def _active_job_state() -> dict[str, Any]:
+    try:
+        return json.loads(_ACTIVE_JOB_PATH.read_text()) if _ACTIVE_JOB_PATH.is_file() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_active_job(state: dict[str, Any]) -> None:
+    _ACTIVE_JOB_PATH.write_text(json.dumps(state))
+
+
+def _resolve_job_context(job_name: str | None = None) -> tuple[str, Path, Path]:
+    if job_name:
+        log_path = _TRAINING_DIR / "logs" / f"{job_name}.log"
+        output_dir = _TRAINING_DIR / "output" / job_name
+        return job_name, log_path, output_dir
+    active = _active_job_state()
+    if active:
+        name = active.get("job_name", _LORA_JOB_NAME)
+        log_path = Path(active.get("log_path", str(_LORA_TRAINING_LOG)))
+        output_dir = Path(active.get("output_dir", str(_LORA_OUTPUT_DIR)))
+        return name, log_path, output_dir
+    return _LORA_JOB_NAME, _LORA_TRAINING_LOG, _LORA_OUTPUT_DIR
+
+
+_MODEL_MAP: dict[str, dict[str, str]] = {
+    "flux2_dev": {"architecture": "flux2", "name_or_path": "black-forest-labs/FLUX.2-dev"},
+    "flux2_klein_4b": {"architecture": "flux2_klein", "name_or_path": "black-forest-labs/FLUX.2-klein-base-4B"},
+    "flux2_klein_9b": {"architecture": "flux2_klein", "name_or_path": "black-forest-labs/FLUX.2-klein-base-9B"},
+    "wan22_i2v_14b": {"architecture": "wan22_i2v", "name_or_path": "Wan-AI/Wan2.2-I2V-14B"},
+    "wan22_t2v_14b": {"architecture": "wan22_t2v", "name_or_path": "Wan-AI/Wan2.2-T2V-14B"},
+}
+
+_TEMPLATE_MAP: dict[str, str] = {
+    "flux2_identity": "flux2_identity_template.yaml",
+    "wan22_i2v_character": "wan22_i2v_character_template.yaml",
+}
+
+
+def _build_training_config(request: LoraTrainingStartRequest) -> tuple[Path, dict[str, Any]]:
+    template_name = _TEMPLATE_MAP[request.base_config]
+    template_path = _TRAINING_DIR / template_name
+    if not template_path.is_file():
+        raise HTTPException(status_code=500, detail=f"Training template not found: {template_name}")
+
+    config = yaml.safe_load(template_path.read_text())
+    model_info = _MODEL_MAP[request.model]
+    dataset_path = _TRAINING_DIR / "datasets" / request.dataset
+
+    if not dataset_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Dataset not found: {request.dataset}")
+
+    job_name = request.job_name
+    trigger = request.trigger_word
+
+    config["config"]["name"] = job_name
+    config["config"]["process"][0]["trigger_word"] = trigger
+    config["config"]["process"][0]["training_folder"] = str(_TRAINING_DIR / "output")
+    config["config"]["process"][0]["network"]["linear"] = request.lora_rank
+    config["config"]["process"][0]["network"]["linear_alpha"] = request.lora_rank
+    config["config"]["process"][0]["train"]["steps"] = request.steps
+    config["config"]["process"][0]["train"]["lr"] = request.learning_rate
+    config["config"]["process"][0]["model"]["name_or_path"] = model_info["name_or_path"]
+
+    datasets = config["config"]["process"][0].get("datasets", [])
+    if datasets:
+        datasets[0]["folder_path"] = str(dataset_path)
+        # Use the closest standard bucket
+        buckets = [r for r in [512, 768, 896, 1024, 1280, 1536] if r <= request.resolution]
+        chosen = buckets[-1] if buckets else 1024
+        datasets[0]["resolution"] = [chosen]
+
+    output_path = _TRAINING_CONFIG_DIR / f"{job_name}.yaml"
+    _TRAINING_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(yaml.dump(config, default_flow_style=False))
+
+    return output_path, config
 
 
 def _safe_output_path(rel: str) -> Path | None:
@@ -1548,33 +1657,88 @@ def _latest_lora_progress(log_text: str) -> dict[str, Any] | None:
     }
 
 
+@app.post("/api/lora-training/start", response_model=LoraTrainingStartResponse)
+async def lora_training_start(body: LoraTrainingStartRequest) -> LoraTrainingStartResponse:
+    # Build the config from template
+    config_path, _ = _build_training_config(body)
+
+    job_name = body.job_name
+    log_path = _TRAINING_DIR / "logs" / f"{job_name}.log"
+    output_dir = _TRAINING_DIR / "output" / job_name
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write active job state so status/checkpoints pick up the new job
+    _write_active_job({
+        "job_name": job_name,
+        "log_path": str(log_path),
+        "output_dir": str(output_dir),
+        "config_path": str(config_path),
+        "dataset": body.dataset,
+        "trigger_word": body.trigger_word,
+        "model": body.model,
+        "started_at": datetime.now(UTC).isoformat(),
+    })
+
+    # Spawn ai-toolkit in the background
+    try:
+        with open(log_path, "w") as log_file:
+            subprocess.Popen(
+                [_TRAINING_RUNNER, str(config_path)],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+    except Exception as exc:
+        return LoraTrainingStartResponse(
+            ok=False,
+            job_name=job_name,
+            status="error",
+            config_path=str(config_path),
+            log_path=str(log_path),
+            output_dir=str(output_dir),
+            error=str(exc),
+        )
+
+    return LoraTrainingStartResponse(
+        ok=True,
+        job_name=job_name,
+        status="started",
+        config_path=str(config_path),
+        log_path=str(log_path),
+        output_dir=str(output_dir),
+    )
+
+
 @app.get("/api/lora-training/status", response_model=LoraTrainingStatus)
-async def lora_training_status() -> LoraTrainingStatus:
+async def lora_training_status(job_name: str | None = None) -> LoraTrainingStatus:
+    resolved_name, log_path, output_dir = _resolve_job_context(job_name)
     gpu_util, vram_percent = _read_gpu_status()
     updated_at = datetime.now(UTC).isoformat()
 
-    if not _LORA_TRAINING_LOG.exists():
+    if not log_path.exists():
         return LoraTrainingStatus(
             ok=False,
             status="missing_log",
-            job_name=_LORA_JOB_NAME,
+            job_name=resolved_name,
             gpu_util=gpu_util,
             vram_percent=vram_percent,
-            log_path=str(_LORA_TRAINING_LOG),
+            log_path=str(log_path),
             updated_at=updated_at,
             error="Training log not found",
         )
 
     try:
-        log_text = _LORA_TRAINING_LOG.read_text(errors="replace")[-200_000:]
+        log_text = log_path.read_text(errors="replace")[-200_000:]
     except Exception as exc:
         return LoraTrainingStatus(
             ok=False,
             status="error",
-            job_name=_LORA_JOB_NAME,
+            job_name=resolved_name,
             gpu_util=gpu_util,
             vram_percent=vram_percent,
-            log_path=str(_LORA_TRAINING_LOG),
+            log_path=str(log_path),
             updated_at=updated_at,
             error=str(exc),
         )
@@ -1585,57 +1749,73 @@ async def lora_training_status() -> LoraTrainingStatus:
         return LoraTrainingStatus(
             ok=True,
             status=status,
-            job_name=_LORA_JOB_NAME,
+            job_name=resolved_name,
             gpu_util=gpu_util,
             vram_percent=vram_percent,
-            log_path=str(_LORA_TRAINING_LOG),
+            log_path=str(log_path),
             updated_at=updated_at,
         )
 
     current_step = progress["current_step"]
     total_steps = progress["total_steps"]
-    final_checkpoint = _LORA_OUTPUT_DIR / f"{_LORA_JOB_NAME}.safetensors"
+    final_checkpoint = output_dir / f"{resolved_name}.safetensors"
 
     completed = current_step >= total_steps
     completed = completed or final_checkpoint.is_file()
     completed = completed or "Done training" in log_text or "Training complete" in log_text
     status = "completed" if completed else "training"
 
-    # ai-toolkit can finish by writing the final unnumbered checkpoint after the last
-    # progress line has already been emitted. In that case tqdm may leave the log at
-    # 1799/1800 even though training is actually complete. The final checkpoint is the
-    # durable source of truth, so normalize the displayed step to 100% when it exists.
     if completed and final_checkpoint.is_file() and current_step < total_steps:
         progress = {**progress, "current_step": total_steps, "progress_percent": 100.0, "eta": "00:00"}
+
+    job_state = _active_job_state()
+    started_at = job_state.get("started_at")
+    finished_at = job_state.get("finished_at")
+    total_duration_seconds = job_state.get("total_duration_seconds")
+
+    if completed and not finished_at:
+        finished_at = updated_at
+        if started_at:
+            try:
+                from datetime import datetime as _dt
+                delta = _dt.fromisoformat(finished_at) - _dt.fromisoformat(started_at)
+                total_duration_seconds = round(delta.total_seconds(), 1)
+            except Exception:
+                pass
+        _write_active_job({**job_state, "finished_at": finished_at, "total_duration_seconds": total_duration_seconds})
 
     return LoraTrainingStatus(
         ok=True,
         status=status,
-        job_name=_LORA_JOB_NAME,
+        job_name=resolved_name,
         gpu_util=gpu_util,
         vram_percent=vram_percent,
-        log_path=str(_LORA_TRAINING_LOG),
+        log_path=str(log_path),
+        started_at=started_at,
+        finished_at=finished_at,
+        total_duration_seconds=total_duration_seconds,
         updated_at=updated_at,
         **progress,
     )
 
 
-def _lora_checkpoint_path(checkpoint: str) -> Path:
+def _lora_checkpoint_path(checkpoint: str, output_dir: Path | None = None) -> Path:
+    od = output_dir or _LORA_OUTPUT_DIR
     if checkpoint == "latest":
         candidates = sorted(
-            _LORA_OUTPUT_DIR.glob("*.safetensors"),
+            od.glob("*.safetensors"),
             key=lambda path: path.stat().st_mtime,
-        ) if _LORA_OUTPUT_DIR.is_dir() else []
+        ) if od.is_dir() else []
         if not candidates:
             raise HTTPException(status_code=404, detail="No LoRA checkpoints found")
         return candidates[-1]
 
     path = Path(checkpoint)
     if not path.is_absolute():
-        path = _LORA_OUTPUT_DIR / checkpoint
+        path = od / checkpoint
     try:
         resolved = path.resolve()
-        output_root = _LORA_OUTPUT_DIR.resolve()
+        output_root = od.resolve()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid checkpoint path: {checkpoint}") from exc
     if not str(resolved).startswith(str(output_root)):
@@ -1725,12 +1905,13 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
 
 
 @app.get("/api/lora-training/checkpoints", response_model=LoraCheckpointsResponse)
-async def lora_training_checkpoints() -> LoraCheckpointsResponse:
+async def lora_training_checkpoints(job_name: str | None = None) -> LoraCheckpointsResponse:
+    resolved_name, _, output_dir = _resolve_job_context(job_name)
     updated_at = datetime.now(UTC).isoformat()
     checkpoints: list[LoraCheckpoint] = []
 
-    if _LORA_OUTPUT_DIR.is_dir():
-        for path in sorted(_LORA_OUTPUT_DIR.glob("*.safetensors")):
+    if output_dir.is_dir():
+        for path in sorted(output_dir.glob("*.safetensors")):
             stat = path.stat()
             step_match = re.search(r"_(\d{6,})\.safetensors$", path.name)
             checkpoints.append(
@@ -1746,7 +1927,7 @@ async def lora_training_checkpoints() -> LoraCheckpointsResponse:
     checkpoints.sort(key=lambda item: item.step if item.step is not None else -1)
     return LoraCheckpointsResponse(
         ok=True,
-        job_name=_LORA_JOB_NAME,
+        job_name=resolved_name,
         checkpoints=checkpoints,
         count=len(checkpoints),
         updated_at=updated_at,

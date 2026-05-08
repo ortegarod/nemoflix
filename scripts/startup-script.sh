@@ -127,10 +127,18 @@ for i in {1..60}; do
 done
 curl -sS --max-time 5 http://127.0.0.1:8188/system_stats
 
+# Install model stacks.
+echo "=== Installing FLUX.2 image stack ==="
+bash "$APP_DIR/scripts/install-image-stack.sh"
+
+echo "=== Installing Wan 2.2 video stack ==="
+bash "$APP_DIR/scripts/install-video-stack.sh"
+
 echo "=== Setup Complete ==="
 echo "ComfyUI worker: http://<droplet-ip>:8188"
 echo "Studio UI and Nemoflix AMD API are hosted on the VPS."
 echo "On the VPS, set COMFY_URL=http://<droplet-ip>:8188 in nemoflix-amd-api.service and restart it."
-echo "Install FLUX.2 image stack: $APP_DIR/scripts/install-image-stack.sh"
-echo "Install Wan 2.2 video stack: $APP_DIR/scripts/install-video-stack.sh"
-echo "Install AI Toolkit training stack: $APP_DIR/scripts/install-ai-toolkit.sh"
+echo ""
+echo "!!! REMINDER !!! Transfer the LoRA model to the droplet (and dataset if traning a LoRA):"
+echo "  scp -i ~/.ssh/id_ed25519_amd_hackathon /home/ubuntu/nemoflix-amd-backups/2026-05-06-rigo-flux2/loras/rigo_flux2_lora_v1_dop.safetensors root@<droplet-ip>:/root/ComfyUI/models/loras/nemoflix-amd/"
+echo "Then restart ComfyUI: systemctl restart comfyui.service"

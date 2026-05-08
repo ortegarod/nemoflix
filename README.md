@@ -8,6 +8,8 @@ Nemoflix is designed for AI agents first. Agents call a simple HTTP API; Nemofli
 
 - Starts a small FastAPI service for agent-driven generation
 - Talks to ComfyUI through its native HTTP API
+- Trains Flux2 identity LoRAs on AMD MI300X and monitors training progress
+- Generates images with character LoRAs through Flux2
 - Builds Wan 2.2 video workflow JSON in code
 - Supports text-to-video and image-to-video requests
 
@@ -25,6 +27,13 @@ Default local service ports:
 
 ```bash
 curl -sS http://127.0.0.1:8190/api/health
+```
+
+### LoRA training status
+
+```bash
+curl -sS http://127.0.0.1:8190/api/lora-training/status
+curl -sS http://127.0.0.1:8190/api/lora-training/checkpoints
 ```
 
 ### Upload image
