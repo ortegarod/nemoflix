@@ -15,7 +15,6 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 3010,
-    historyApiFallback: true,
     proxy: {
       "/api": { target: process.env.NEMOFLIX_API_URL, changeOrigin: true },
       "/media": { target: process.env.NEMOFLIX_API_URL, changeOrigin: true },
