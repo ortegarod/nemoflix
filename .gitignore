@@ -44,3 +44,4 @@ training/
 
 # Local/generated Hugging Face Space preview artifacts
 outputs/
+studio/public/demos/*.mp4

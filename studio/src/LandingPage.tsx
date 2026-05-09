@@ -5,6 +5,7 @@ import {
   Cpu,
   Film,
   Lock,
+  Play,
   Server,
   Sparkles,
   Users,
@@ -76,24 +77,44 @@ function Hero() {
           variant="outline"
         >
           <Cpu className="w-3.5 h-3.5" />
-          AMD MI300X · 192 GB VRAM · ROCm · Open Source
+          AMD MI300X · 192 GB VRAM · Open Source
         </Badge>
 
         <h1 className="text-5xl md:text-7xl font-bold leading-tight tracking-tight mb-6 text-white">
-          AI Visual Studio
+          Put Yourself
           <br />
           <span className="bg-gradient-to-r from-rose-400 via-fuchsia-400 to-amber-400 bg-clip-text text-transparent">
-            Built for Agents.
+            In the Film.
           </span>
         </h1>
 
+        {/* Hero video — phone-sized preview right under headline */}
+        <div className="mx-auto max-w-xs sm:max-w-sm md:max-w-md mb-10">
+          <div className="rounded-[1.5rem] overflow-hidden border border-gray-800/60 bg-gray-950 shadow-2xl shadow-rose-500/10 ring-1 ring-white/5 aspect-square">
+            <video
+              src="/demos/iron-man-flight.mp4"
+              controls
+              poster=""
+              className="w-full h-full object-cover"
+              preload="metadata"
+              autoPlay
+              muted
+              loop
+              playsInline
+            />
+          </div>
+          <div className="flex items-center justify-center gap-2 mt-2">
+            <span className="text-[10px] text-gray-600 uppercase tracking-wider">Wan 2.2 I2V · AMD MI300X</span>
+          </div>
+        </div>
+
         <p className="text-xl text-gray-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-          Train character LoRAs on AMD MI300X in ~90 minutes. Generate
-          photorealistic images. Animate to video. Your AI agent controls the
-          whole pipeline through a simple HTTP API.
+          Upload a few photos. Build a model of yourself. Generate photorealistic
+          images in any scene you can imagine. Animate them into short films.
+          <span className="text-white font-medium"> What used to take days now takes minutes.</span>
         </p>
 
-        <div className="flex items-center justify-center gap-3 flex-wrap">
+        <div className="flex flex-col items-center gap-3">
           <Link to="/studio" className={btnPrimary}>
             <Sparkles className="w-4 h-4" />
             Launch Studio
@@ -102,15 +123,14 @@ function Hero() {
             href="https://github.com/ortegarod/nemoflix"
             target="_blank"
             rel="noopener noreferrer"
-            className={btnOutline}
+            className="text-xs text-gray-500 hover:text-gray-300 transition"
           >
-            <GitHubIcon className="w-4 h-4" />
-            View on GitHub
+            View on GitHub →
           </a>
         </div>
 
         <p className="mt-8 text-xs text-gray-700">
-          ComfyUI-native · PostgreSQL · Python 3.11+
+          Self-hosted · Agent-native · MIT License
         </p>
       </div>
     </section>
@@ -165,6 +185,108 @@ function Pillars() {
             </CardContent>
           </Card>
         ))}
+      </div>
+    </section>
+  );
+}
+
+/* ── Feature Film Showcase ── */
+function FeatureFilmShowcase() {
+  return (
+    <section className="py-28 px-6 border-y border-gray-800/40 bg-gradient-to-b from-black via-gray-950/30 to-black">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-16">
+          <Badge className="mb-4 gap-1.5 border-fuchsia-500/20 bg-fuchsia-500/5 text-fuchsia-300 h-7 px-3" variant="outline">
+            <Film className="w-3.5 h-3.5" />
+            Built in One Week
+          </Badge>
+          <h2 className="text-4xl md:text-5xl font-bold text-white mb-5">
+            You and Your Agent.
+            <br />
+            <span className="bg-gradient-to-r from-rose-400 via-fuchsia-400 to-amber-400 bg-clip-text text-transparent">
+              Co-Directing a Film.
+            </span>
+          </h2>
+          <p className="text-lg text-gray-500 max-w-2xl mx-auto leading-relaxed">
+            This is what a human and their AI agent can build together in a week.
+            You bring the vision. The agent handles the technical heavy lifting —
+            scene planning, shot management, generation queues, and final assembly.
+            Like having a creative partner who knows every button in Photoshop,
+            but for the entire film pipeline.
+          </p>
+        </div>
+
+        {/* The Film */}
+        <div className="max-w-4xl mx-auto">
+          <div className="rounded-2xl overflow-hidden border border-gray-800/60 bg-gray-950 shadow-2xl shadow-fuchsia-500/5 aspect-video">
+            <video
+              src="/demos/feature-film.mp4"
+              controls
+              poster=""
+              className="w-full h-full object-cover"
+              preload="metadata"
+            />
+          </div>
+
+          <div className="mt-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 px-1">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Badge className="gap-1 border-fuchsia-500/20 bg-fuchsia-500/5 text-fuchsia-300 text-[10px]" variant="outline">
+                  <Film className="w-3 h-3" /> Full Project Render
+                </Badge>
+                <span className="text-xs text-gray-500">Multi-shot · assembled · AMD MI300X</span>
+              </div>
+              <h3 className="text-base font-semibold text-white">Hackathon Feature Film</h3>
+              <p className="text-sm text-gray-500 mt-1 leading-relaxed max-w-xl">
+                Script → scenes → shots → generated images → animated clips → stitched final cut.
+                The agent directed the pipeline. The human directed the vision.
+              </p>
+            </div>
+            <Link
+              to="/studio"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-700 hover:border-rose-500/50 px-4 py-2 text-xs font-medium text-gray-300 hover:text-white transition shrink-0"
+            >
+              Try It Yourself <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        </div>
+
+        {/* Human + Agent narrative */}
+        <div className="mt-20 grid md:grid-cols-3 gap-5 max-w-5xl mx-auto">
+          {[
+            {
+              icon: Users,
+              color: "text-rose-400",
+              border: "border-rose-500/20",
+              title: "You bring the vision",
+              body: "Describe the film you want. Your character, the scenes, the mood. The agent listens and structures it into a real production pipeline.",
+            },
+            {
+              icon: Bot,
+              color: "text-fuchsia-400",
+              border: "border-fuchsia-500/20",
+              title: "The agent handles execution",
+              body: "It plans shots, writes prompts, queues generations, tracks renders, and assembles the final cut. No manual clicking through ComfyUI nodes.",
+            },
+            {
+              icon: Sparkles,
+              color: "text-amber-400",
+              border: "border-amber-500/20",
+              title: "You iterate together",
+              body: "Review each shot. Regenerate what doesn't land. Adjust the script. The agent adapts instantly. You're co-directors, not operator and tool.",
+            },
+          ].map((item) => (
+            <div
+              key={item.title}
+              className={`rounded-2xl border ${item.border} bg-gradient-to-b from-gray-950/80 to-black p-6`}
+            >
+              <item.icon className={`w-5 h-5 ${item.color} mb-3`} />
+              <h3 className="text-sm font-semibold text-white mb-2">{item.title}</h3>
+              <p className="text-xs text-gray-500 leading-relaxed">{item.body}</p>
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -273,6 +395,45 @@ function HowItWorks() {
         </Card>
       ),
     },
+    {
+      n: "04",
+      color: "text-emerald-400",
+      ring: "ring-emerald-500/30",
+      title: "Build Films Scene by Scene",
+      body: "Projects hold Scenes, Scenes hold Shots — each with its own generated image and video. When every shot is animated, hit render and Nemoflix stitches the whole thing together into one finished video. Your agent wrote, directed, and rendered a short film, start to finish.",
+      aside: (
+        <Card className="border-emerald-500/20 bg-gradient-to-b from-emerald-950/20 to-gray-950/60 ring-0">
+          <CardHeader>
+            <Badge className="w-fit gap-1.5 border-emerald-500/20 bg-emerald-500/5 text-emerald-400" variant="outline">
+              <Film className="w-3 h-3" /> Projects
+            </Badge>
+            <CardTitle className="text-white text-sm mt-2">Film Structure</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="font-mono text-xs space-y-2">
+              <div className="text-emerald-300/80">
+                Project <span className="text-emerald-500">"Neon Nights"</span>
+              </div>
+              <div className="pl-4 border-l border-gray-800 space-y-1.5">
+                <div className="text-gray-400">
+                  Scene 1 <span className="text-gray-600">"Alley Chase"</span>
+                </div>
+                <div className="pl-4 text-gray-600 space-y-0.5">
+                  <div>Shot 1A → image + video</div>
+                  <div>Shot 1B → image + video</div>
+                </div>
+                <div className="text-gray-400 pt-1">
+                  Scene 2 <span className="text-gray-600">"Rooftop"</span>
+                </div>
+              </div>
+            </div>
+            <p className="text-[11px] text-emerald-300/50 mt-4">
+              One API. Train → generate → animate → render.
+            </p>
+          </CardContent>
+        </Card>
+      ),
+    },
   ];
 
   return (
@@ -281,7 +442,7 @@ function HowItWorks() {
         <div className="text-center mb-20">
           <h2 className="text-4xl font-bold text-white mb-4">How It Works</h2>
           <p className="text-gray-500 text-lg">
-            From reference photos to animated video in three steps.
+            From reference photos to a finished film in four steps.
           </p>
         </div>
 
@@ -421,6 +582,7 @@ export default function LandingPage() {
       <Navbar />
       <Hero />
       <Pillars />
+      <FeatureFilmShowcase />
       <HowItWorks />
       <Features />
       <CTA />
