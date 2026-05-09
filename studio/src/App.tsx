@@ -61,6 +61,7 @@ function Shell() {
   const ctx = useApp();
   const navigate = useNavigate();
   const projectMatch = useMatch("/projects/:projectId");
+  const loraMatch = useMatch("/lora-training");
 
   // Load project when entering a project-detail route
   const lastProjectId = useRef<string | undefined>(undefined);
@@ -72,6 +73,11 @@ function Shell() {
       ctx.setActiveSidebarTab("projects");
     }
   }, [projectMatch?.params.projectId]);
+
+  // Keep "Characters & LoRA Training" sidebar tab highlighted when on /lora-training
+  useEffect(() => {
+    if (loraMatch) ctx.setActiveSidebarTab("characters");
+  }, [loraMatch]);
 
   const videoCount = ctx.items.filter(
     (item) => item.type === "video" || item.url.endsWith(".mp4") || item.url.endsWith(".webm")
@@ -281,7 +287,8 @@ function ProjectRoute() {
 
 function CharacterRoute() {
   const { characterId } = useParams<{ characterId: string }>();
-  const { items, setSelected, deleteItem, setActiveSidebarTab } = useApp();
+  const { items, setSelected, deleteItem, setActiveSidebarTab, setSidebarOpen } = useApp();
+  const navigate = useNavigate();
   if (!characterId) return null;
   return (
     <CharacterProfileView
@@ -289,7 +296,11 @@ function CharacterRoute() {
       items={items}
       onOpen={setSelected}
       onDelete={deleteItem}
-      onGenerate={() => setActiveSidebarTab("generate")}
+      onGenerate={() => {
+        setSidebarOpen(true);
+        setActiveSidebarTab("generate");
+        navigate(`/?character=${characterId}`);
+      }}
     />
   );
 }

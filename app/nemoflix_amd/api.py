@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from .comfy import ComfyClient
 from .config import ComfyNode, get_settings
-from .db import close_db, delete_character, delete_media_rows, delete_project, delete_project_scene, delete_project_shot, get_character, get_job, get_latest_training_job, get_project, get_project_scene, get_project_shot, get_project_shot_version, get_project_shot_version_by_prompt, get_training_job, init_db, list_characters, list_jobs, list_media, list_project_scenes, list_project_shot_versions, list_project_shots, list_projects, list_training_jobs, media_count, next_shot_version_number, save_job, save_training_job, update_job_metadata, update_job_status, update_training_job_status, upsert_character, upsert_media, upsert_project, upsert_project_scene, upsert_project_shot, upsert_project_shot_version, utc_from_timestamp
+from .db import close_db, delete_character, delete_media_rows, delete_project, delete_project_scene, delete_project_shot, get_character, get_job, get_latest_training_job, get_project, get_project_scene, get_project_shot, get_project_shot_version, get_project_shot_version_by_prompt, get_training_job, init_db, list_characters, list_datasets, list_jobs, list_media, list_project_scenes, list_project_shot_versions, list_project_shots, list_projects, list_training_jobs, media_count, next_shot_version_number, save_job, save_training_job, update_job_metadata, update_job_status, update_training_job_status, upsert_character, upsert_dataset, upsert_media, upsert_project, upsert_project_scene, upsert_project_shot, upsert_project_shot_version, utc_from_timestamp
 from .workflows import WAN_NEGATIVE, build_flux2_lora_image, build_wan22_i2v, build_wan22_t2v
 
 app = FastAPI(
@@ -2087,6 +2087,25 @@ async def lora_training_checkpoints(job_name: str | None = None) -> LoraCheckpoi
 async def lora_training_jobs():
     jobs = await list_training_jobs()
     return {"jobs": jobs, "count": len(jobs)}
+
+
+@app.get("/api/lora-training/datasets")
+async def lora_training_datasets_list():
+    datasets = await list_datasets()
+    return {"datasets": datasets, "count": len(datasets)}
+
+
+class CreateDatasetRequest(BaseModel):
+    id: str = Field(min_length=1, description="Folder name on the droplet under /root/nemoflix-training/datasets/")
+    name: str = Field(min_length=1)
+    description: str | None = None
+    image_count: int | None = None
+
+
+@app.post("/api/lora-training/datasets")
+async def lora_training_datasets_create(body: CreateDatasetRequest):
+    dataset = await upsert_dataset(body.id, body.name, body.description, body.image_count)
+    return {"ok": True, "dataset": dataset}
 
 
 @app.get("/api/lora-training/samples")

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { LoraCheckpoint } from "../../types";
 
 interface GenerateTabProps {
@@ -55,6 +56,7 @@ export function GenerateTab({ checkpoints, onQueued }: GenerateTabProps) {
     return final?.name || checkpoints[checkpoints.length - 1]?.name || "latest";
   }, [checkpoints]);
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [mode, setMode] = useState<GenerateMode>("image");
   const [characters, setCharacters] = useState<CharacterSummary[]>([]);
   const [characterId, setCharacterId] = useState("none");
@@ -76,6 +78,15 @@ export function GenerateTab({ checkpoints, onQueued }: GenerateTabProps) {
       .then((data) => setCharacters(data.characters || []))
       .catch(() => setCharacters([]));
   }, []);
+
+  // When ?character= appears in the URL, pre-select it and clear the param
+  useEffect(() => {
+    const preselect = searchParams.get("character");
+    if (preselect) {
+      setCharacterId(preselect);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams.get("character")]);
 
   const selectedCharacter = characters.find((character) => character.id === characterId);
   const selectedCharacterHasImageLora = Boolean(selectedCharacter?.loras?.some((lora) => lora.workflow === "flux2_lora"));

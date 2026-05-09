@@ -182,6 +182,28 @@ async def list_training_jobs() -> list[dict[str, Any]]:
     return [_training_job_row(row) for row in rows]
 
 
+async def list_datasets() -> list[dict[str, Any]]:
+    rows = await get_pool().fetch("SELECT * FROM datasets ORDER BY created_at")
+    return [dict(row) for row in rows]
+
+
+async def upsert_dataset(id: str, name: str, description: str | None = None, image_count: int | None = None) -> dict[str, Any]:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO datasets (id, name, description, image_count)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (id) DO UPDATE SET
+                name        = EXCLUDED.name,
+                description = COALESCE(EXCLUDED.description, datasets.description),
+                image_count = COALESCE(EXCLUDED.image_count, datasets.image_count)
+            RETURNING *
+            """,
+            id, name, description, image_count,
+        )
+    return dict(row)
+
+
 async def save_training_job(
     job_name: str,
     *,

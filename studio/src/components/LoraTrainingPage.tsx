@@ -1,8 +1,9 @@
-import React, { useCallback, useState } from "react";
-import { ChevronDown, Sparkles } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
+import { ChevronDown, Database, FolderPlus, X } from "lucide-react";
 import { useApp } from "../App";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
   Table,
@@ -12,6 +13,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+
+interface Dataset {
+  id: string;
+  name: string;
+  description: string | null;
+  image_count: number | null;
+  created_at: string;
+}
 
 interface Sample {
   name: string;
@@ -47,6 +56,62 @@ export function LoraTrainingPage() {
   const jobs = ctx.trainingJobs ?? [];
   const live = ctx.training;
 
+  // Datasets
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [datasetsLoading, setDatasetsLoading] = useState(true);
+  const [showAddDataset, setShowAddDataset] = useState(false);
+  const [addDatasetId, setAddDatasetId] = useState("");
+  const [addDatasetName, setAddDatasetName] = useState("");
+  const [addDatasetDesc, setAddDatasetDesc] = useState("");
+  const [addDatasetCount, setAddDatasetCount] = useState("");
+  const [addDatasetSubmitting, setAddDatasetSubmitting] = useState(false);
+  const [addDatasetError, setAddDatasetError] = useState<string | null>(null);
+
+  const loadDatasets = useCallback(async () => {
+    try {
+      const res = await fetch("/api/lora-training/datasets");
+      const data = await res.json();
+      setDatasets(data.datasets || []);
+    } catch {
+      // ignore — non-critical
+    } finally {
+      setDatasetsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadDatasets(); }, [loadDatasets]);
+
+  const submitAddDataset = async () => {
+    setAddDatasetError(null);
+    setAddDatasetSubmitting(true);
+    try {
+      const res = await fetch("/api/lora-training/datasets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: addDatasetId,
+          name: addDatasetName || addDatasetId,
+          description: addDatasetDesc || undefined,
+          image_count: addDatasetCount ? parseInt(addDatasetCount, 10) : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.detail || "Failed to register dataset");
+      }
+      setAddDatasetId("");
+      setAddDatasetName("");
+      setAddDatasetDesc("");
+      setAddDatasetCount("");
+      setShowAddDataset(false);
+      loadDatasets();
+    } catch (e: any) {
+      setAddDatasetError(e.message);
+    } finally {
+      setAddDatasetSubmitting(false);
+    }
+  };
+
   const mergedJobs = jobs.map((job: any) => {
     // Merge live ai-toolkit data into the matching job row so we get real
     // current_step / total_steps / loss / info. ai-toolkit uses "running"
@@ -63,6 +128,34 @@ export function LoraTrainingPage() {
     }
     return job;
   });
+
+  const [showForm] = useState(true);
+  const [formJobName, setFormJobName] = useState("");
+  const [formTrigger, setFormTrigger] = useState("");
+  const [formDataset, setFormDataset] = useState("rigo_flux2_lora_v1_dop");
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const submitTraining = async () => {
+    setSubmitError(null);
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/lora-training/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_name: formJobName, trigger_word: formTrigger, dataset: formDataset }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to start training");
+      setFormJobName("");
+      setFormTrigger("");
+      ctx.load();
+    } catch (e: any) {
+      setSubmitError(e.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
   // Cache samples + checkpoints per job so expanding one doesn't overwrite another.
@@ -126,11 +219,170 @@ export function LoraTrainingPage() {
             Train fine-tuned character LoRAs on AMD MI300X. Track all jobs, checkpoints, and stats.
           </p>
         </div>
-        <Button disabled className="gap-2 bg-fuchsia-600 hover:bg-fuchsia-500 text-white">
-          <Sparkles className="w-4 h-4" />
-          New Training Job
-        </Button>
       </div>
+
+      {/* New training form */}
+      {showForm && (
+        <div className="rounded-xl border border-fuchsia-500/30 bg-gray-950 p-5 space-y-4">
+          <h2 className="text-sm font-semibold text-fuchsia-300 uppercase tracking-wide">Start Training Job</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="space-y-1.5">
+              <label className="text-xs text-gray-400 uppercase tracking-wide">Job Name</label>
+              <Input
+                placeholder="e.g. rigo_v6_full"
+                value={formJobName}
+                onChange={e => setFormJobName(e.target.value)}
+                className="bg-black/40 border-gray-700 text-white placeholder:text-gray-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-gray-400 uppercase tracking-wide">Trigger Word</label>
+              <Input
+                placeholder="e.g. Rigo"
+                value={formTrigger}
+                onChange={e => setFormTrigger(e.target.value)}
+                className="bg-black/40 border-gray-700 text-white placeholder:text-gray-600"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs text-gray-400 uppercase tracking-wide">Dataset</label>
+              {datasets.length > 0 ? (
+                <select
+                  value={formDataset}
+                  onChange={e => setFormDataset(e.target.value)}
+                  className="w-full rounded-md border border-gray-700 bg-black/40 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-fuchsia-500"
+                >
+                  {datasets.map(ds => (
+                    <option key={ds.id} value={ds.id}>{ds.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <Input
+                  value={formDataset}
+                  onChange={e => setFormDataset(e.target.value)}
+                  className="bg-black/40 border-gray-700 text-white"
+                />
+              )}
+            </div>
+          </div>
+          {submitError && <p className="text-sm text-rose-400">{submitError}</p>}
+          <Button
+            onClick={submitTraining}
+            disabled={submitting || !formJobName || !formTrigger || !formDataset}
+            className="bg-fuchsia-600 hover:bg-fuchsia-500 text-white"
+          >
+            {submitting ? "Starting…" : "Start Training"}
+          </Button>
+        </div>
+      )}
+
+      {/* Datasets */}
+      <section className="rounded-xl border border-gray-800/60 bg-gray-950 overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-800/60 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Database className="w-4 h-4 text-fuchsia-400" />
+            <h2 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">
+              Training Datasets
+              <span className="ml-2 text-xs font-mono text-gray-500">{datasets.length}</span>
+            </h2>
+          </div>
+          <button
+            onClick={() => setShowAddDataset(!showAddDataset)}
+            className="flex items-center gap-1.5 rounded-lg border border-gray-700 bg-gray-900/60 px-3 py-1.5 text-xs text-gray-300 hover:text-white hover:border-fuchsia-500/50 transition"
+          >
+            {showAddDataset ? <X className="w-3.5 h-3.5" /> : <FolderPlus className="w-3.5 h-3.5" />}
+            {showAddDataset ? "Cancel" : "Add Dataset"}
+          </button>
+        </div>
+
+        {showAddDataset && (
+          <div className="px-5 py-4 border-b border-gray-800/40 bg-gray-900/20 space-y-3">
+            <p className="text-xs text-gray-500">
+              Register a dataset folder. Place your images at{" "}
+              <code className="text-gray-400 bg-black/40 px-1 rounded">/root/nemoflix-training/datasets/&lt;id&gt;/</code>{" "}
+              on the AMD node before starting a training job.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="space-y-1">
+                <label className="text-[10px] text-gray-500 uppercase tracking-wide">Folder ID *</label>
+                <Input
+                  placeholder="e.g. rigo_v2_photos"
+                  value={addDatasetId}
+                  onChange={e => setAddDatasetId(e.target.value)}
+                  className="bg-black/40 border-gray-700 text-white text-sm placeholder:text-gray-600"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] text-gray-500 uppercase tracking-wide">Display Name</label>
+                <Input
+                  placeholder="Optional display name"
+                  value={addDatasetName}
+                  onChange={e => setAddDatasetName(e.target.value)}
+                  className="bg-black/40 border-gray-700 text-white text-sm placeholder:text-gray-600"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] text-gray-500 uppercase tracking-wide">Description</label>
+                <Input
+                  placeholder="e.g. Rigo reference photos v2"
+                  value={addDatasetDesc}
+                  onChange={e => setAddDatasetDesc(e.target.value)}
+                  className="bg-black/40 border-gray-700 text-white text-sm placeholder:text-gray-600"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] text-gray-500 uppercase tracking-wide">Image Count</label>
+                <Input
+                  type="number"
+                  placeholder="e.g. 25"
+                  value={addDatasetCount}
+                  onChange={e => setAddDatasetCount(e.target.value)}
+                  className="bg-black/40 border-gray-700 text-white text-sm placeholder:text-gray-600"
+                />
+              </div>
+            </div>
+            {addDatasetError && <p className="text-sm text-rose-400">{addDatasetError}</p>}
+            <Button
+              onClick={submitAddDataset}
+              disabled={addDatasetSubmitting || !addDatasetId}
+              className="bg-fuchsia-600 hover:bg-fuchsia-500 text-white text-sm"
+            >
+              {addDatasetSubmitting ? "Registering…" : "Register Dataset"}
+            </Button>
+          </div>
+        )}
+
+        {datasetsLoading ? (
+          <p className="text-xs text-gray-500 px-5 py-6">Loading…</p>
+        ) : datasets.length === 0 ? (
+          <p className="text-sm text-gray-500 py-8 text-center">
+            No datasets registered. Add one above, then reference it when starting a training job.
+          </p>
+        ) : (
+          <div className="divide-y divide-gray-800/40">
+            {datasets.map(ds => (
+              <div
+                key={ds.id}
+                className="px-5 py-3 flex items-center gap-4 hover:bg-gray-900/30 transition cursor-pointer"
+                onClick={() => setFormDataset(ds.id)}
+                title="Use in training form"
+              >
+                <div className="w-8 h-8 rounded-lg bg-fuchsia-900/30 border border-fuchsia-500/20 flex items-center justify-center flex-shrink-0">
+                  <Database className="w-4 h-4 text-fuchsia-400" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-white truncate">{ds.name}</p>
+                  <p className="text-[11px] text-gray-500 font-mono">{ds.id}{ds.description ? ` · ${ds.description}` : ""}</p>
+                </div>
+                {ds.image_count != null && (
+                  <span className="text-[11px] text-gray-500 flex-shrink-0">{ds.image_count} images</span>
+                )}
+                <span className="text-[10px] text-gray-600 flex-shrink-0">{new Date(ds.created_at).toLocaleDateString()}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
