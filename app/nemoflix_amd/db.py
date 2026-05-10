@@ -326,7 +326,7 @@ def _json_row(row: asyncpg.Record, keys: tuple[str, ...]) -> dict[str, Any]:
 
 
 def _project_row(row: asyncpg.Record) -> dict[str, Any]:
-    return _json_row(row, ("characters", "metadata"))
+    return _json_row(row, ("characters", "narrator_voice", "metadata"))
 
 
 def _scene_row(row: asyncpg.Record) -> dict[str, Any]:
@@ -355,8 +355,8 @@ async def upsert_project(project: dict[str, Any]) -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO projects (id, title, description, aspect_ratio, duration_seconds, status, characters, metadata, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,NOW())
+            INSERT INTO projects (id, title, description, aspect_ratio, duration_seconds, status, characters, narrator_voice, metadata, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,NOW())
             ON CONFLICT (id) DO UPDATE SET
                 title=EXCLUDED.title,
                 description=EXCLUDED.description,
@@ -364,6 +364,7 @@ async def upsert_project(project: dict[str, Any]) -> dict[str, Any]:
                 duration_seconds=EXCLUDED.duration_seconds,
                 status=EXCLUDED.status,
                 characters=EXCLUDED.characters,
+                narrator_voice=EXCLUDED.narrator_voice,
                 metadata=EXCLUDED.metadata,
                 updated_at=NOW()
             RETURNING *
@@ -375,6 +376,7 @@ async def upsert_project(project: dict[str, Any]) -> dict[str, Any]:
             project.get("duration_seconds"),
             project.get("status", "draft"),
             _json(project.get("characters", [])),
+            _json(project.get("narrator_voice")),
             _json(project.get("metadata", {})),
         )
     return _project_row(row)
@@ -392,6 +394,11 @@ async def delete_project_scene(project_id: str, scene_id: str) -> bool:
 
 async def delete_project_shot(project_id: str, scene_id: str, shot_id: str) -> bool:
     result = await get_pool().execute("DELETE FROM project_shots WHERE project_id=$1 AND scene_id=$2 AND id=$3", project_id, scene_id, shot_id)
+    return not result.endswith(" 0")
+
+
+async def delete_project_render_row(render_id: str) -> bool:
+    result = await get_pool().execute("DELETE FROM project_renders WHERE id=$1", render_id)
     return not result.endswith(" 0")
 
 
@@ -522,19 +529,18 @@ async def upsert_project_shot(shot: dict[str, Any]) -> dict[str, Any]:
         row = await conn.fetchrow(
             """
             INSERT INTO project_shots (
-                id, project_id, scene_id, shot_number, text, description, subtitle, voiceover, image_prompt, motion_prompt,
-                camera_motion, characters, duration_seconds, status, image_file, video_file,
+                id, project_id, scene_id, shot_number, text, description, subtitle, speaker, image_prompt, motion_prompt,
+                characters, duration_seconds, status, image_file, video_file,
                 image_prompt_id, video_prompt_id, metadata, updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,NOW())
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$17,$18::jsonb,NOW())
             ON CONFLICT (id) DO UPDATE SET
                 shot_number=EXCLUDED.shot_number,
                 text=EXCLUDED.text,
                 description=EXCLUDED.description,
                 subtitle=EXCLUDED.subtitle,
-                voiceover=EXCLUDED.voiceover,
+                speaker=EXCLUDED.speaker,
                 image_prompt=EXCLUDED.image_prompt,
                 motion_prompt=EXCLUDED.motion_prompt,
-                camera_motion=EXCLUDED.camera_motion,
                 characters=EXCLUDED.characters,
                 duration_seconds=EXCLUDED.duration_seconds,
                 status=EXCLUDED.status,
@@ -553,10 +559,9 @@ async def upsert_project_shot(shot: dict[str, Any]) -> dict[str, Any]:
             shot.get("text"),
             shot.get("description"),
             shot.get("subtitle"),
-            shot.get("voiceover"),
+            shot.get("speaker"),
             shot.get("image_prompt"),
             shot.get("motion_prompt"),
-            shot.get("camera_motion"),
             _json(shot.get("characters", [])),
             shot.get("duration_seconds", 5),
             shot.get("status", "draft"),
@@ -567,6 +572,76 @@ async def upsert_project_shot(shot: dict[str, Any]) -> dict[str, Any]:
             _json(shot.get("metadata", {})),
         )
     return _shot_row(row)
+
+
+# ── Project renders ──
+
+def _render_row(row: asyncpg.Record) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "project_id": row["project_id"],
+        "render_number": row["render_number"],
+        "status": row["status"],
+        "final_video": row["final_video"],
+        "error_message": row["error_message"],
+        "metadata": row["metadata"] or {},
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+async def next_render_number(project_id: str) -> int:
+    value = await get_pool().fetchval(
+        "SELECT COALESCE(MAX(render_number), 0) + 1 FROM project_renders WHERE project_id=$1",
+        project_id,
+    )
+    return int(value or 1)
+
+
+async def list_project_renders(project_id: str) -> list[dict[str, Any]]:
+    rows = await get_pool().fetch(
+        """
+        SELECT * FROM project_renders
+        WHERE project_id=$1
+        ORDER BY render_number DESC
+        """,
+        project_id,
+    )
+    return [_render_row(row) for row in rows]
+
+
+async def get_project_render(project_id: str, render_id: str) -> dict[str, Any] | None:
+    row = await get_pool().fetchrow(
+        "SELECT * FROM project_renders WHERE project_id=$1 AND id=$2",
+        project_id,
+        render_id,
+    )
+    return _render_row(row) if row else None
+
+
+async def upsert_project_render(render: dict[str, Any]) -> dict[str, Any]:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO project_renders (id, project_id, render_number, status, final_video, error_message, metadata, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,NOW())
+            ON CONFLICT (id) DO UPDATE SET
+                status=EXCLUDED.status,
+                final_video=EXCLUDED.final_video,
+                error_message=EXCLUDED.error_message,
+                metadata=COALESCE(project_renders.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                updated_at=NOW()
+            RETURNING *
+            """,
+            render["id"],
+            render["project_id"],
+            render["render_number"],
+            render.get("status", "pending"),
+            render.get("final_video"),
+            render.get("error_message"),
+            _json(render.get("metadata", {})),
+        )
+    return _render_row(row)
 
 
 async def list_jobs(limit: int = 100) -> list[dict[str, Any]]:
@@ -636,6 +711,8 @@ async def list_media(limit: int = 60, offset: int = 0) -> list[dict[str, Any]]:
     rows = await get_pool().fetch(
         """
         SELECT * FROM media
+        WHERE workflow_type IS DISTINCT FROM 'project_render'
+          AND NOT (filename LIKE 'projects/%' AND filename LIKE '%render-%')
         ORDER BY COALESCE(modified, created_at) DESC, filename DESC
         LIMIT $1 OFFSET $2
         """,
@@ -653,6 +730,40 @@ async def delete_media_rows(files: list[str]) -> None:
     if not files:
         return
     await get_pool().execute("DELETE FROM media WHERE filename = ANY($1::text[])", files)
+
+
+async def delete_project_shot_versions_by_files(files: list[str]) -> None:
+    if not files:
+        return
+    async with get_pool().acquire() as conn:
+        # If image file is deleted, clear image and video (video depends on image)
+        await conn.execute(
+            """
+            UPDATE project_shots
+            SET image_file = NULL,
+                video_file = NULL,
+                video_prompt_id = NULL,
+                status = 'draft'
+            WHERE image_file = ANY($1::text[])
+            """,
+            files,
+        )
+        # If video file is deleted (but image remains), clear just video
+        await conn.execute(
+            """
+            UPDATE project_shots
+            SET video_file = NULL,
+                video_prompt_id = NULL,
+                status = 'image_ready'
+            WHERE video_file = ANY($1::text[]) AND image_file IS NOT NULL
+            """,
+            files,
+        )
+        # Delete version records
+        await conn.execute(
+            "DELETE FROM project_shot_versions WHERE file = ANY($1::text[])",
+            files,
+        )
 
 
 def utc_from_timestamp(value: float) -> datetime:

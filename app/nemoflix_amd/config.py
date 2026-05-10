@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     database_url: str = Field(validation_alias="DATABASE_URL")
     output_dir: str = Field(default="/home/ubuntu/nemoflix/outputs", validation_alias="NEMOFLIX_OUTPUT_DIR")
     aitk_api_url: str = Field(validation_alias="AITK_API_URL")
+    elevenlabs_api_key: str | None = Field(default=None, validation_alias="ELEVENLABS_API_KEY")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

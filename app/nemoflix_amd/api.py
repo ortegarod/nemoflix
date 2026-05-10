@@ -16,13 +16,79 @@ from urllib.parse import quote, urlparse, urlunparse
 import httpx
 import websockets
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .comfy import ComfyClient
 from .config import ComfyNode, get_settings
-from .db import close_db, delete_character, delete_media_rows, delete_project, delete_project_scene, delete_project_shot, get_character, get_job, get_latest_training_job, get_project, get_project_scene, get_project_shot, get_project_shot_version, get_project_shot_version_by_prompt, get_training_job, init_db, list_characters, list_datasets, list_jobs, list_media, list_project_scenes, list_project_shot_versions, list_project_shots, list_projects, list_training_jobs, media_count, next_shot_version_number, save_job, save_training_job, update_job_metadata, update_job_status, update_training_job_status, upsert_character, upsert_dataset, upsert_media, upsert_project, upsert_project_scene, upsert_project_shot, upsert_project_shot_version, utc_from_timestamp
+from .db import close_db, delete_character, delete_media_rows, delete_project, delete_project_render_row, delete_project_scene, delete_project_shot, delete_project_shot_versions_by_files, get_character, get_job, get_latest_training_job, get_project, get_project_render, get_project_scene, get_project_shot, get_project_shot_version, get_project_shot_version_by_prompt, get_training_job, init_db, list_characters, list_datasets, list_jobs, list_media, list_project_renders, list_project_scenes, list_project_shot_versions, list_project_shots, list_projects, list_training_jobs, media_count, next_render_number, next_shot_version_number, save_job, save_training_job, update_job_metadata, update_job_status, update_training_job_status, upsert_character, upsert_dataset, upsert_media, upsert_project, upsert_project_render, upsert_project_scene, upsert_project_shot, upsert_project_shot_version, utc_from_timestamp
 from .workflows import WAN_NEGATIVE, build_flux2_lora_image, build_wan22_i2v, build_wan22_t2v
+
+# ── ElevenLabs TTS ──
+# Default voice from the account's available voices. Users can override per-character or per-project.
+ELEVENLABS_VOICE_ID = "CwhRBWXzGAHq8TQ4Fs17"  # Roger — Laid-Back, Casual, Resonant
+
+
+async def _generate_tts(text: str, output_path: Path, voice_id: str | None = None, voice_settings: dict[str, Any] | None = None) -> bool:
+    """Generate TTS audio via ElevenLabs and save to output_path."""
+    settings = get_settings()
+    api_key = settings.elevenlabs_api_key
+    if not api_key:
+        return False
+    payload: dict[str, Any] = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+    }
+    vs = voice_settings or {}
+    payload["voice_settings"] = {
+        "stability": vs.get("stability", 0.6),
+        "similarity_boost": vs.get("similarity_boost", 0.8),
+        "style": vs.get("style", 0.2),
+        "use_speaker_boost": vs.get("use_speaker_boost", True),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id or ELEVENLABS_VOICE_ID}",
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            resp.raise_for_status()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(resp.content)
+            return True
+    except Exception:
+        return False
+
+
+async def _tts_voices() -> list[dict[str, Any]]:
+    """List available ElevenLabs voices."""
+    settings = get_settings()
+    api_key = settings.elevenlabs_api_key
+    if not api_key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                "https://api.elevenlabs.io/v1/voices",
+                headers={"xi-api-key": api_key},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return [
+                {
+                    "voice_id": v.get("voice_id"),
+                    "name": v.get("name"),
+                    "category": v.get("category"),
+                    "labels": v.get("labels", {}),
+                    "description": v.get("description"),
+                }
+                for v in data.get("voices", [])
+            ]
+    except Exception:
+        return []
+
 
 app = FastAPI(
     title="Nemoflix AMD API",
@@ -45,6 +111,14 @@ class CharacterLoraBinding(BaseModel):
     base_model: str | None = None
 
 
+class VoiceConfig(BaseModel):
+    """TTS voice configuration for a character or narrator."""
+    provider: str = "elevenlabs"
+    voice_id: str
+    name: str | None = None
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
 class CharacterRecord(BaseModel):
     id: str = Field(min_length=1, pattern=r"^[a-zA-Z0-9_-]+$")
     name: str = Field(min_length=1)
@@ -53,6 +127,7 @@ class CharacterRecord(BaseModel):
     description: str | None = None
     source_images: list[str] = Field(default_factory=list)
     loras: list[CharacterLoraBinding] = Field(default_factory=list)
+    voice: VoiceConfig | None = None
     defaults: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -65,6 +140,7 @@ class ProjectRecord(BaseModel):
     duration_seconds: int | None = None
     status: str = "draft"
     characters: list[str] = Field(default_factory=list)
+    narrator_voice: VoiceConfig | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -104,10 +180,9 @@ class ShotRecord(BaseModel):
     text: str | None = None
     description: str | None = None
     subtitle: str | None = None
-    voiceover: str | None = None
+    speaker: str | None = None
     image_prompt: str | None = None
     motion_prompt: str | None = None
-    camera_motion: str | None = None
     characters: list[str] = Field(default_factory=list)
     duration_seconds: int = 5
     status: str = "draft"
@@ -130,7 +205,7 @@ class VideoGenerateRequest(BaseModel):
     length: int = Field(default=121, description="Frame count, not seconds")
     fps: int = 16
     seed: int | None = None
-    filename_prefix: str = "videos"
+    filename_prefix: str | None = None
     steps_high: int = 2
     steps_low: int = 2
     cfg_high: float = 3.5
@@ -170,7 +245,7 @@ class ImageGenerateRequest(BaseModel):
     width: int = 1248
     height: int = 832
     seed: int | None = None
-    filename_prefix: str = "images/generated"
+    filename_prefix: str | None = None
     steps: int = 20
     cfg: float = 4.0
     sampler: str = "euler"
@@ -331,6 +406,20 @@ def comfy_for_role(role: str) -> tuple[ComfyClient, ComfyNode]:
 
 
 _WS_TASK: asyncio.Task | None = None
+_SSE_CLIENTS: set[asyncio.Queue] = set()
+
+
+async def _sse_broadcast(event: str, data: dict[str, Any]) -> None:
+    if not _SSE_CLIENTS:
+        return
+    payload = f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    dead = set()
+    for q in _SSE_CLIENTS:
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            dead.add(q)
+    _SSE_CLIENTS.difference_update(dead)
 
 
 def _ws_url(base_url: str, client_id: str) -> str:
@@ -389,6 +478,7 @@ async def _comfy_ws_bridge() -> None:
                     prompt_id = data.get("prompt_id") or data.get("prompt")
                     if msg_type == "execution_start" and isinstance(prompt_id, str):
                         await update_job_status(prompt_id, "running")
+                        await _sse_broadcast("job_update", {"prompt_id": prompt_id, "status": "running"})
                     elif msg_type == "progress_state" and isinstance(prompt_id, str):
                         nodes = data.get("nodes", {})
                         if isinstance(nodes, dict):
@@ -396,11 +486,13 @@ async def _comfy_ws_bridge() -> None:
                     elif msg_type == "progress" and isinstance(prompt_id, str):
                         value = int(data.get("value") or 0)
                         max_value = int(data.get("max") or 0)
+                        pct = round((value / max_value) * 100, 1) if max_value else None
                         await update_job_metadata(prompt_id, {
                             "step_value": value,
                             "step_max": max_value,
-                            "progress_percent": round((value / max_value) * 100, 1) if max_value else None,
+                            "progress_percent": pct,
                         })
+                        await _sse_broadcast("job_update", {"prompt_id": prompt_id, "status": "running", "progress_percent": pct})
                     elif msg_type == "execution_success" and isinstance(prompt_id, str):
                         await update_job_metadata(prompt_id, {"progress_percent": 100})
                         try:
@@ -409,13 +501,40 @@ async def _comfy_ws_bridge() -> None:
                             await _persist_outputs(prompt_id, outputs)
                         except Exception:
                             pass
+                        await _sse_broadcast("job_update", {"prompt_id": prompt_id, "status": "completed"})
                     elif msg_type in {"execution_error", "execution_interrupted"} and isinstance(prompt_id, str):
                         error = data.get("exception_message") or msg_type
                         await update_job_status(prompt_id, "failed", error=error)
+                        await _sse_broadcast("job_update", {"prompt_id": prompt_id, "status": "failed", "error": error})
         except asyncio.CancelledError:
             raise
         except Exception:
             await asyncio.sleep(3)
+
+
+@app.get("/api/events")
+async def sse_events(request: Request) -> StreamingResponse:
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=50)
+    _SSE_CLIENTS.add(q)
+
+    async def stream():
+        try:
+            yield "data: {\"type\": \"connected\"}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
+                    yield msg
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            _SSE_CLIENTS.discard(q)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
 
 
 @app.on_event("startup")
@@ -601,7 +720,7 @@ async def patch_character(character_id: str, patch: dict[str, Any]) -> Character
     current = await get_character(character_id)
     if not current:
         raise HTTPException(status_code=404, detail="Character not found")
-    allowed = {"name", "kind", "trigger", "description", "source_images", "loras", "defaults", "metadata"}
+    allowed = {"name", "kind", "trigger", "description", "source_images", "loras", "voice", "defaults", "metadata"}
     unknown = sorted(set(patch) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unsupported character fields: {', '.join(unknown)}")
@@ -622,6 +741,9 @@ async def remove_character(character_id: str) -> dict[str, Any]:
 @app.get("/api/projects")
 async def projects(limit: int = 100) -> dict[str, Any]:
     items = await list_projects(limit)
+    # Augment each project with render count from the renders table
+    for item in items:
+        item["render_count"] = len(await list_project_renders(item["id"]))
     return {"projects": items, "count": len(items)}
 
 
@@ -647,7 +769,7 @@ async def patch_project(project_id: str, patch: dict[str, Any]) -> ProjectRecord
     current = await get_project(project_id)
     if not current:
         raise HTTPException(status_code=404, detail="Project not found")
-    allowed = {"title", "description", "aspect_ratio", "duration_seconds", "status", "characters", "metadata"}
+    allowed = {"title", "description", "aspect_ratio", "duration_seconds", "status", "characters", "narrator_voice", "metadata"}
     unknown = sorted(set(patch) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unsupported project fields: {', '.join(unknown)}")
@@ -751,7 +873,7 @@ async def patch_project_shot(project_id: str, scene_id: str, shot_id: str, patch
     current = await get_project_shot(project_id, scene_id, shot_id)
     if not current:
         raise HTTPException(status_code=404, detail="Shot not found")
-    allowed = {"shot_number", "text", "description", "subtitle", "voiceover", "image_prompt", "motion_prompt", "camera_motion", "characters", "duration_seconds", "status", "image_file", "video_file", "image_prompt_id", "video_prompt_id", "metadata"}
+    allowed = {"shot_number", "text", "description", "subtitle", "speaker", "image_prompt", "motion_prompt", "characters", "duration_seconds", "status", "image_file", "video_file", "image_prompt_id", "video_prompt_id", "metadata"}
     unknown = sorted(set(patch) - allowed)
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unsupported shot fields: {', '.join(unknown)}")
@@ -856,9 +978,9 @@ async def animate_project_shot(project_id: str, scene_id: str, shot_id: str) -> 
         raise HTTPException(status_code=404, detail="Shot not found")
     if shot.get("status") in {"rendering_image", "animating"}:
         raise HTTPException(status_code=409, detail="Shot is already rendering")
-    prompt = shot.get("motion_prompt") or shot.get("text") or shot.get("image_prompt")
+    prompt = shot.get("motion_prompt")
     if not prompt:
-        raise HTTPException(status_code=400, detail="Shot motion_prompt, text, or image_prompt is required")
+        raise HTTPException(status_code=400, detail="Shot motion_prompt is required")
 
     character_ids = await _project_character_ids(project_id, scene_id, shot)
     resolved = await _resolve_characters(None, _character_bindings_from_ids(character_ids))
@@ -932,35 +1054,160 @@ def _srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-async def _set_render_status(project_id: str, status: str, error: str | None = None, final_video: str | None = None) -> None:
+async def _set_render_status(project_id: str, status: str, error: str | None = None, final_video: str | None = None, render_id: str | None = None) -> None:
+    # Update legacy metadata for backward compat (frontend watches this)
     project = await get_project(project_id)
-    if not project:
-        return
-    meta = dict(project.get("metadata") or {})
-    meta["render_status"] = status
-    if error is not None:
-        meta["render_error"] = error
-    if final_video is not None:
-        meta["final_video"] = final_video
-    project["metadata"] = meta
-    await upsert_project(project)
+    if project:
+        meta = dict(project.get("metadata") or {})
+        meta["render_status"] = status
+        if error is not None:
+            meta["render_error"] = error
+        if final_video is not None:
+            meta["final_video"] = final_video
+        project["metadata"] = meta
+        await upsert_project(project)
+
+    # Update the proper project_renders record if we have a render_id
+    if render_id:
+        await upsert_project_render({
+            "id": render_id,
+            "project_id": project_id,
+            "render_number": 0,  # not used on update
+            "status": status,
+            "final_video": final_video,
+            "error_message": error,
+        })
 
 
 async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: str) -> None:
+    # Create the render record in the database
+    render_number = await next_render_number(project_id)
+    await upsert_project_render({
+        "id": render_id,
+        "project_id": project_id,
+        "render_number": render_number,
+        "status": "running",
+    })
+
     out_path = (_OUTPUT_DIR / f"projects/{project_id}/render-{render_id}.mp4").resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     clip_pairs: list[tuple[Path, dict[str, Any]]] = []
     for shot in shots:
-        p = (_OUTPUT_DIR / shot["video_file"]).resolve()
-        if not p.is_file():
-            await _set_render_status(project_id, "failed", f"Missing clip for shot {shot['id']}: {shot['video_file']}")
-            return
-        clip_pairs.append((p, shot))
+        video_file = shot.get("video_file")
+        image_file = shot.get("image_file")
+        if video_file:
+            p = (_OUTPUT_DIR / video_file).resolve()
+            if not p.is_file():
+                await _set_render_status(project_id, "failed", f"Missing clip for shot {shot['id']}: {video_file}")
+                return
+            clip_pairs.append((p, shot))
+        elif image_file:
+            img_p = (_OUTPUT_DIR / image_file).resolve()
+            if not img_p.is_file():
+                continue  # skip shots with missing image
+            duration = float(shot.get("duration_seconds") or 5)
+            still_path = _OUTPUT_DIR / f"projects/{project_id}/render-{render_id}-still-{shot['id']}.mp4"
+            still_cmd = [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", str(img_p),
+                "-t", str(duration),
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                str(still_path),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *still_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            if proc.returncode != 0:
+                await _set_render_status(project_id, "failed", f"Failed to freeze image for shot {shot['id']}")
+                return
+            clip_pairs.append((still_path, shot))
+        # no media — skip
 
+    # ── Look up voice for each shot based on speaker ──
+    project = await get_project(project_id)
+    character_voices: dict[str, dict[str, Any]] = {}
+    for cid in (project.get("characters") if project else []):
+        char = await get_character(cid)
+        if char and char.get("voice"):
+            voice = char["voice"]
+            if isinstance(voice, str):
+                try:
+                    voice = json.loads(voice)
+                except Exception:
+                    voice = {}
+            if isinstance(voice, dict):
+                character_voices[cid] = voice
+
+    narrator_voice = project.get("narrator_voice") if project else None
+    if isinstance(narrator_voice, str):
+        try:
+            narrator_voice = json.loads(narrator_voice)
+        except Exception:
+            narrator_voice = None
+    if not isinstance(narrator_voice, dict):
+        narrator_voice = None
+
+    # ── Generate TTS voiceovers and mix into clips ──
+    mixed_clips: list[Path] = []
+    for idx, (clip_path, shot) in enumerate(clip_pairs, start=1):
+        subtitle_text = (shot.get("subtitle") or "").strip()
+        duration = float(shot.get("duration_seconds") or 5)
+        speaker = (shot.get("speaker") or "").strip()
+
+        if subtitle_text:
+            voice_id: str | None = None
+            voice_settings: dict[str, Any] | None = None
+
+            if speaker and speaker in character_voices:
+                v = character_voices[speaker]
+                voice_id = v.get("voice_id")
+                voice_settings = v.get("settings")
+            elif narrator_voice:
+                voice_id = narrator_voice.get("voice_id")
+                voice_settings = narrator_voice.get("settings")
+
+            if voice_id:
+                tts_path = _OUTPUT_DIR / f"projects/{project_id}/render-{render_id}-shot{idx:02d}-tts.mp3"
+                tts_ok = await _generate_tts(subtitle_text, tts_path, voice_id=voice_id, voice_settings=voice_settings)
+                if tts_ok:
+                    mixed_path = _OUTPUT_DIR / f"projects/{project_id}/render-{render_id}-shot{idx:02d}-mixed.mp4"
+                    mix_cmd = [
+                        "ffmpeg", "-y",
+                        "-i", str(clip_path),
+                        "-i", str(tts_path),
+                        "-c:v", "copy",
+                        "-c:a", "aac",
+                        "-b:a", "192k",
+                        "-af", f"volume=0.9,apad=pad_dur=0.5",
+                        "-shortest",
+                        "-t", str(duration),
+                        str(mixed_path),
+                    ]
+                    proc = await asyncio.create_subprocess_exec(
+                        *mix_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await proc.communicate()
+                    if proc.returncode == 0:
+                        mixed_clips.append(mixed_path)
+                        continue
+            # Fallback to original clip
+            mixed_clips.append(clip_path)
+            continue
+        # No subtitle — use original clip
+        mixed_clips.append(clip_path)
+
+    # ── Concatenate mixed clips ──
     concat_tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, prefix="nemo_concat_")
     try:
-        for p, _ in clip_pairs:
+        for p in mixed_clips:
             concat_tmp.write(f"file '{p}'\n")
         concat_tmp.flush()
         concat_path = concat_tmp.name
@@ -991,10 +1238,10 @@ async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: s
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path]
     if srt_path:
         style = "FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2"
-        cmd += ["-vf", f"subtitles={srt_path}:force_style='{style}'", "-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        cmd += ["-vf", f"subtitles={srt_path}:force_style='{style}'", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "192k"]
     else:
-        cmd += ["-c:v", "copy"]
-    cmd += ["-an", str(out_path)]
+        cmd += ["-c:v", "copy", "-c:a", "copy"]
+    cmd += [str(out_path)]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1021,7 +1268,7 @@ async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: s
         "workflow_type": "project_render",
         "prompt": project_id,
     })
-    await _set_render_status(project_id, "completed", final_video=rel)
+    await _set_render_status(project_id, "completed", final_video=rel, render_id=render_id)
 
 
 @app.post("/api/projects/{project_id}/render")
@@ -1039,9 +1286,9 @@ async def render_project(project_id: str, background_tasks: BackgroundTasks) -> 
     if not ordered_shots:
         raise HTTPException(status_code=400, detail="Project has no shots")
 
-    missing = [s["id"] for s in ordered_shots if not s.get("video_file")]
-    if missing:
-        raise HTTPException(status_code=400, detail=f"Shots missing video: {missing}")
+    renderable = [s for s in ordered_shots if s.get("video_file") or s.get("image_file")]
+    if not renderable:
+        raise HTTPException(status_code=400, detail="No shots have images or video to render")
 
     render_id = _new_id("rnd")
     meta = dict(project.get("metadata") or {})
@@ -1053,6 +1300,13 @@ async def render_project(project_id: str, background_tasks: BackgroundTasks) -> 
     return {"ok": True, "render_id": render_id, "shot_count": len(ordered_shots)}
 
 
+@app.get("/api/tts/voices")
+async def list_tts_voices() -> dict[str, Any]:
+    """List available ElevenLabs voices for TTS."""
+    voices = await _tts_voices()
+    return {"voices": voices}
+
+
 @app.get("/api/projects/{project_id}/render")
 async def render_project_status(project_id: str) -> dict[str, Any]:
     project = await get_project(project_id)
@@ -1060,13 +1314,43 @@ async def render_project_status(project_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Project not found")
     meta = project.get("metadata") or {}
     final_video = meta.get("final_video")
+    renders = await list_project_renders(project_id)
     return {
         "status": meta.get("render_status", "none"),
         "render_id": meta.get("render_id"),
         "final_video": final_video,
         "final_video_url": f"/media/{final_video}" if final_video else None,
         "render_error": meta.get("render_error"),
+        "renders": [
+            {
+                "id": r["id"],
+                "render_number": r["render_number"],
+                "final_video": r["final_video"],
+                "final_video_url": f"/media/{r['final_video']}" if r["final_video"] else None,
+                "created_at": r["created_at"],
+                "status": r["status"],
+                "error_message": r["error_message"],
+            }
+            for r in renders
+        ],
     }
+
+
+@app.delete("/api/projects/{project_id}/renders/{render_id}")
+async def delete_project_render(project_id: str, render_id: str) -> dict[str, Any]:
+    project = await get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    render = await get_project_render(project_id, render_id)
+    if not render:
+        raise HTTPException(status_code=404, detail="Render not found")
+    # Delete the file if it exists
+    if render.get("final_video"):
+        target = _safe_output_path(render["final_video"])
+        if target and target.is_file():
+            target.unlink()
+    await delete_project_render_row(render_id)
+    return {"ok": True}
 
 
 @app.get("/api/health")
@@ -1179,6 +1463,7 @@ async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
     low_lora = body.low_lora
     high_lora_strength = body.high_lora_strength
     low_lora_strength = body.low_lora_strength
+    filename_prefix = _resolve_filename_prefix(body.filename_prefix, "videos")
 
     if body.mode == "i2v":
         if not image:
@@ -1192,7 +1477,7 @@ async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
             length=body.length,
             fps=body.fps,
             seed=body.seed,
-            filename_prefix=body.filename_prefix,
+            filename_prefix=filename_prefix,
             steps_high=body.steps_high,
             steps_low=body.steps_low,
             cfg_high=body.cfg_high,
@@ -1218,7 +1503,7 @@ async def generate_video(body: VideoGenerateRequest) -> VideoGenerateResponse:
             length=body.length,
             fps=body.fps,
             seed=body.seed,
-            filename_prefix=body.filename_prefix,
+            filename_prefix=filename_prefix,
             steps_high=body.steps_high,
             steps_low=body.steps_low,
             cfg_high=body.cfg_high,
@@ -1499,10 +1784,25 @@ import os
 
 import yaml
 
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response  # StreamingResponse imported at top
 
 _OUTPUT_DIR = Path(get_settings().output_dir)
 _ALLOW_EXT = {".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm", ".gif"}
+
+
+def _resolve_filename_prefix(prefix: str | None, subfolder: str) -> str:
+    """Return a unique filename prefix.
+
+    If prefix is None, generate a random 8-char hex ID under subfolder.
+    If prefix is provided, raise 409 if any file with that prefix already exists locally.
+    """
+    if prefix is None:
+        return f"{subfolder}/{uuid.uuid4().hex[:8]}"
+    safe = prefix.strip().lstrip("/")
+    existing = list((_OUTPUT_DIR / safe).parent.glob(f"{(_OUTPUT_DIR / safe).name}*"))
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Filename prefix '{safe}' already exists — choose a different name.")
+    return safe
 _TRAINING_DIR = Path(os.environ.get("NEMOFLIX_TRAINING_DIR", "/home/ubuntu/nemoflix/training"))
 _TRAINING_CONFIG_DIR = _TRAINING_DIR / "config"
 # Droplet paths — these live on the GPU worker, referenced by name only from the VPS.
@@ -1737,7 +2037,7 @@ async def _sync_filesystem_media(limit: int | None = None) -> None:
     try:
         iterator = _OUTPUT_DIR.rglob("*")
         for entry in iterator:
-            if entry.is_file() and entry.suffix.lower() in _ALLOW_EXT and ".thumbs" not in entry.parts and "samples" not in entry.parts and "projects" not in entry.parts:
+            if entry.is_file() and entry.suffix.lower() in _ALLOW_EXT and ".thumbs" not in entry.parts and "samples" not in entry.parts and not entry.name.startswith("render-"):
                 entries.append(entry)
     except (FileNotFoundError, PermissionError):
         return
@@ -1984,13 +2284,15 @@ async def generate_image(body: ImageGenerateRequest) -> ImageGenerateResponse:
         checkpoint_lora_name = _comfy_lora_name_for_checkpoint(checkpoint_path)
         loras.insert(0, {"name": checkpoint_lora_name, "strength": body.lora_strength, "checkpoint": checkpoint_name})
 
+    filename_prefix = _resolve_filename_prefix(body.filename_prefix, "images")
+
     graph = build_flux2_lora_image(
         prompt=prompt,
         loras=loras,
         width=body.width,
         height=body.height,
         seed=body.seed,
-        filename_prefix=body.filename_prefix,
+        filename_prefix=filename_prefix,
         steps=body.steps,
         cfg=body.cfg,
         sampler=body.sampler,
@@ -2188,5 +2490,6 @@ async def delete_media(body: dict[str, Any]) -> dict[str, Any]:
 
     if deleted:
         await delete_media_rows(deleted)
+        await delete_project_shot_versions_by_files(deleted)
     return {"ok": not failed, "deleted": deleted, "failed": failed}
 
