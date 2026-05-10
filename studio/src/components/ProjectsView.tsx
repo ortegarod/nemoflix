@@ -168,6 +168,23 @@ export function ProjectsView({ compact = false, onOpenProject }: ProjectsViewPro
                 {project.duration_seconds !== null && (
                   <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{project.duration_seconds}s</span>
                 )}
+                {(project.metadata?.final_video || (project as any).render_count > 0) && (
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <Film className="w-3 h-3" />
+                    {(project as any).render_count || 1} render{(project as any).render_count > 1 ? "s" : ""}
+                  </span>
+                )}
+                {(project.metadata?.final_video) && (
+                  <a
+                    href={`/media/${project.metadata.final_video}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2"
+                  >
+                    Watch
+                  </a>
+                )}
                 <span className="ml-auto">{formatRelative(project.updated_at)}</span>
               </div>
             </article>

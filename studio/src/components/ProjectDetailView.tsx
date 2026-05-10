@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Film, Image as ImageIcon, Video, Wand2, Plus, Save, Layers, Sparkles, Edit3, Play, ArrowLeft, Trash2, Clapperboard, Loader2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Film, Image as ImageIcon, Video, Wand2, Plus, Save, Layers, Sparkles, Edit3, Play, ArrowLeft, Trash2, Clapperboard, Loader2, CheckCircle2, AlertTriangle, X, Download } from "lucide-react";
 import type { JobItem, Project, Scene, Shot, ShotVersion, ProjectPhase } from "../types";
 
 interface ProjectDetailViewProps {
@@ -41,6 +42,7 @@ export function ProjectDetailView({
   const [versions, setVersions] = useState<ShotVersion[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [renderStatus, setRenderStatus] = useState<string>(() => String(project.metadata?.render_status ?? "none"));
+  const [renders, setRenders] = useState<Array<{ id: string; render_number: number; final_video_url: string | null; created_at: string; status: string }>>([]);
   const [finalVideoUrl, setFinalVideoUrl] = useState<string | null>(() => {
     const v = project.metadata?.final_video;
     return typeof v === "string" ? `/media/${v}` : null;
@@ -65,6 +67,12 @@ export function ProjectDetailView({
         const data = await res.json();
         setRenderStatus(data.status ?? "none");
         if (data.final_video_url) setFinalVideoUrl(data.final_video_url);
+        if (data.renders) {
+          setRenders(data.renders);
+          if (!activeRenderId && data.renders.length > 0) {
+            setActiveRenderId(data.renders[0].id);
+          }
+        }
         if (data.status !== "rendering") {
           if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
           if (data.status === "failed") setError(`Render failed: ${data.render_error ?? "unknown error"}`);
@@ -104,6 +112,7 @@ export function ProjectDetailView({
   }, [project.id, selectedSceneId, selectedShotId, shots]);
 
   const [saving, setSaving] = useState(false);
+  const [showRenderConfirm, setShowRenderConfirm] = useState(false);
 
   // Look up the active job for a shot by matching prompt IDs
   function shotJob(shot: Shot): JobItem | undefined {
@@ -201,7 +210,7 @@ export function ProjectDetailView({
   return (
     <div className="h-full flex flex-col bg-black">
       {/* Top bar */}
-      <div className="flex items-center justify-between gap-3 px-5 py-2.5 border-b border-gray-800/60 bg-gray-950/60 flex-shrink-0">
+      <div className="relative flex items-center justify-between gap-3 px-5 py-2.5 border-b border-gray-800/60 bg-gray-950/60 flex-shrink-0 z-30">
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <button
             onClick={onBack}
@@ -221,9 +230,15 @@ export function ProjectDetailView({
             <span className="rounded-full border border-gray-800 bg-gray-900/50 px-2.5 py-1 text-gray-500">{project.duration_seconds}s</span>
           )}
           <span className="rounded-full border border-gray-800 bg-gray-900/50 px-2.5 py-1 text-gray-500 uppercase tracking-wider">{project.status}</span>
-          {phase === "animate" && renderStatus !== "completed" && (
+          <Link
+            to={`/studio/projects/${project.id}/films`}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-600/15 hover:bg-emerald-600/25 px-3 py-1.5 text-xs font-medium text-emerald-100 transition"
+          >
+            <Film className="w-3.5 h-3.5" /> Films ({renders.length})
+          </Link>
+          {phase !== "outline" && (
             <button
-              onClick={handleRender}
+              onClick={() => renderStatus !== "rendering" && setShowRenderConfirm(true)}
               disabled={renderStatus === "rendering"}
               className="inline-flex items-center gap-1.5 rounded-xl border border-violet-500/40 bg-violet-600/15 hover:bg-violet-600/25 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-xs font-medium text-violet-100 transition"
             >
@@ -232,16 +247,6 @@ export function ProjectDetailView({
                 : <><Clapperboard className="w-3.5 h-3.5" /> Render final video</>
               }
             </button>
-          )}
-          {renderStatus === "completed" && finalVideoUrl && (
-            <a
-              href={finalVideoUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-600/15 hover:bg-emerald-600/25 px-3 py-1.5 text-xs font-medium text-emerald-100 transition"
-            >
-              <Play className="w-3.5 h-3.5" /> Watch final video
-            </a>
           )}
         </div>
       </div>
@@ -336,6 +341,17 @@ export function ProjectDetailView({
                   </button>
                 );
               })}
+              {selectedShot && (
+                <button
+                  disabled
+                  title="Coming soon"
+                  className="flex-shrink-0 h-14 px-3 rounded-lg border border-dashed border-gray-800 bg-gray-900/30 flex items-center gap-1.5 text-[10px] font-medium text-gray-600 cursor-not-allowed"
+                >
+                  <Layers className="w-3 h-3" />
+                  Import from gallery
+                  <span className="text-[8px] uppercase tracking-wider text-gray-500">Soon</span>
+                </button>
+              )}
             </div>
           </div>
         </main>
@@ -372,6 +388,16 @@ export function ProjectDetailView({
         <div className="absolute top-16 right-4 rounded-xl border border-red-500/30 bg-red-950/40 backdrop-blur px-3 py-2 text-xs text-red-300 max-w-sm cursor-pointer" onClick={() => setError(null)}>
           {error}
         </div>
+      )}
+
+      {showRenderConfirm && (
+        <RenderConfirmModal
+          project={project}
+          scenes={scenes}
+          shots={shots}
+          onConfirm={() => { setShowRenderConfirm(false); handleRender(); }}
+          onCancel={() => setShowRenderConfirm(false)}
+        />
       )}
     </div>
   );
@@ -693,7 +719,7 @@ function ShotEditor({ shot, phase, saving, onPatch, onGenerate, onAnimate }: Sho
         />
       </Field>
 
-      <Field label="Motion prompt" hint="Camera move + motion for the animate step.">
+      <Field label="Video prompt" hint="Camera move + motion for the animate step.">
         <textarea
           value={draft.motion_prompt}
           onChange={(e) => setDraft((d) => ({ ...d, motion_prompt: e.target.value }))}
@@ -801,9 +827,160 @@ function ProjectSummary({ project }: { project: Project }) {
           </div>
         </div>
       )}
+      <div className="pt-2 border-t border-gray-800/40">
+        <p className="text-[11px] font-medium text-gray-300 mb-2">Share (coming soon)</p>
+        <div className="grid grid-cols-1 gap-1.5">
+          <button disabled className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5 text-[11px] text-gray-500 text-left flex items-center gap-2 opacity-50 cursor-not-allowed">
+            <span className="text-rose-400">♪</span> TikTok
+          </button>
+          <button disabled className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5 text-[11px] text-gray-500 text-left flex items-center gap-2 opacity-50 cursor-not-allowed">
+            <span className="text-red-400">▶</span> YouTube Shorts
+          </button>
+          <button disabled className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5 text-[11px] text-gray-500 text-left flex items-center gap-2 opacity-50 cursor-not-allowed">
+            <span className="text-pink-400">▣</span> Instagram Reels
+          </button>
+          <button disabled className="rounded-lg border border-gray-800 bg-gray-900/40 px-2.5 py-1.5 text-[11px] text-gray-500 text-left flex items-center gap-2 opacity-50 cursor-not-allowed">
+            <span className="text-purple-400">◉</span> X / Twitter
+          </button>
+        </div>
+      </div>
       <p className="text-[11px] text-gray-600 leading-relaxed pt-2 border-t border-gray-800/40">
         Pick a scene from the Projects tab to start editing shots, or ask your agent to draft an outline.
       </p>
+    </div>
+  );
+}
+
+function RenderConfirmModal({
+  project, scenes, shots, onConfirm, onCancel,
+}: {
+  project: Project;
+  scenes: Scene[];
+  shots: Shot[];
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const animated = shots.filter((s) => s.video_file);
+  const imageOnly = shots.filter((s) => s.image_file && !s.video_file);
+  const noMedia = shots.filter((s) => !s.image_file && !s.video_file);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm" onClick={onCancel}>
+      <div
+        className="w-full max-w-md mx-4 rounded-2xl border border-gray-700/60 bg-gray-950 shadow-2xl flex flex-col max-h-[80vh]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800/60 flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <Clapperboard className="w-4 h-4 text-violet-400" />
+            <h2 className="text-sm font-semibold text-gray-100">Render final video</h2>
+          </div>
+          <button onClick={onCancel} className="text-gray-600 hover:text-gray-300 transition">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Project meta */}
+        <div className="px-5 py-2.5 border-b border-gray-800/40 flex items-center gap-2 text-[11px] text-gray-400 flex-shrink-0">
+          <span className="font-medium text-gray-200">{project.title}</span>
+          <span className="text-gray-700">·</span>
+          <span>{project.aspect_ratio}</span>
+          {project.duration_seconds != null && (
+            <><span className="text-gray-700">·</span><span>{project.duration_seconds}s</span></>
+          )}
+        </div>
+
+        {/* Shot list */}
+        <div className="flex-1 overflow-y-auto px-5 py-3 space-y-3 min-h-0">
+          {scenes.map((scene) => {
+            const sceneShots = shots
+              .filter((s) => s.scene_id === scene.id)
+              .sort((a, b) => a.shot_number - b.shot_number);
+            if (sceneShots.length === 0) return null;
+            return (
+              <div key={scene.id}>
+                <p className="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5 font-medium">
+                  {scene.title || `Scene ${scene.scene_number}`}
+                </p>
+                <div className="space-y-1">
+                  {sceneShots.map((shot) => {
+                    const hasVideo = !!shot.video_file;
+                    const hasImage = !!shot.image_file;
+                    return (
+                      <div key={shot.id} className="flex items-start gap-2.5 rounded-lg bg-gray-900/50 px-2.5 py-2">
+                        <span className="flex-shrink-0 mt-0.5">
+                          {hasVideo
+                            ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                            : hasImage
+                            ? <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                            : <X className="w-3.5 h-3.5 text-red-500/60" />}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className="text-[10px] font-mono text-gray-500">shot {shot.shot_number}</span>
+                            <span className={`text-[9px] uppercase tracking-wider font-medium ${
+                              hasVideo ? "text-emerald-400" : hasImage ? "text-amber-400" : "text-red-400/60"
+                            }`}>
+                              {hasVideo ? "animated" : hasImage ? "image only" : "no media"}
+                            </span>
+                          </div>
+                          {shot.subtitle ? (
+                            <p className="text-[11px] text-gray-400 leading-relaxed line-clamp-2 italic">"{shot.subtitle}"</p>
+                          ) : (
+                            <p className="text-[11px] text-gray-600 italic">no subtitle</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Warnings */}
+        {(imageOnly.length > 0 || noMedia.length > 0) && (
+          <div className="px-5 py-3 border-t border-gray-800/40 space-y-1.5 flex-shrink-0">
+            {imageOnly.length > 0 && (
+              <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                <AlertTriangle className="w-3 h-3 inline mr-1 mb-0.5" />
+                {imageOnly.length === 1 ? "1 shot" : `${imageOnly.length} shots`} without animation — will render as a still image.
+              </p>
+            )}
+            {noMedia.length > 0 && (
+              <p className="text-[11px] text-red-400/70 leading-relaxed">
+                <X className="w-3 h-3 inline mr-1 mb-0.5" />
+                {noMedia.length} shot{noMedia.length > 1 ? "s" : ""} with no media — will be skipped.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Stats row + actions */}
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-gray-800/60 flex-shrink-0">
+          <div className="flex items-center gap-3 text-[11px]">
+            {animated.length > 0 && <span className="text-emerald-400 font-medium">{animated.length} animated</span>}
+            {imageOnly.length > 0 && <span className="text-amber-400 font-medium">{imageOnly.length} image-only</span>}
+            {noMedia.length > 0 && <span className="text-red-400/70 font-medium">{noMedia.length} empty</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onCancel}
+              className="px-4 py-1.5 rounded-xl border border-gray-700 bg-gray-900/50 hover:bg-gray-900 text-xs text-gray-300 hover:text-gray-100 transition"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={onConfirm}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-xl border border-violet-500/40 bg-violet-600/20 hover:bg-violet-600/30 text-xs font-medium text-violet-100 transition"
+            >
+              <Clapperboard className="w-3.5 h-3.5" /> Render
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

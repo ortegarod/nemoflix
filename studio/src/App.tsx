@@ -6,6 +6,7 @@ import { CharacterProfileView } from "./components/CharacterProfileView";
 import { ProjectsView } from "./components/ProjectsView";
 import { LoraTrainingPage } from "./components/LoraTrainingPage";
 import { ProjectDetailView } from "./components/ProjectDetailView";
+import { ProjectFilmsView } from "./components/ProjectFilmsView";
 import { AppSidebar } from "./components/sidebar/AppSidebar";
 import LandingPage from "./LandingPage";
 import type { SidebarTab } from "./components/sidebar/AppSidebar";
@@ -289,6 +290,18 @@ function ProjectRoute() {
   );
 }
 
+function ProjectFilmsRoute() {
+  const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
+  if (!projectId) return null;
+  return (
+    <ProjectFilmsView
+      projectId={projectId}
+      onBack={() => navigate(`/studio/projects/${projectId}`)}
+    />
+  );
+}
+
 function CharacterRoute() {
   const { characterId } = useParams<{ characterId: string }>();
   const { items, setSelected, deleteItem, setActiveSidebarTab, setSidebarOpen } = useApp();
@@ -364,7 +377,15 @@ export default function App() {
   useEffect(() => {
     load();
     const id = window.setInterval(load, 5000);
-    return () => window.clearInterval(id);
+
+    const es = new EventSource("/api/events");
+    es.addEventListener("job_update", () => load());
+    es.onerror = () => {};
+
+    return () => {
+      window.clearInterval(id);
+      es.close();
+    };
   }, [load]);
 
   const loadProject = useCallback(async (id: string) => {
@@ -492,6 +513,7 @@ export default function App() {
             <Route index element={<StudioRoute />} />
             <Route path="projects" element={<ProjectsRoute />} />
             <Route path="projects/:projectId" element={<ProjectRoute />} />
+            <Route path="projects/:projectId/films" element={<ProjectFilmsRoute />} />
             <Route path="characters/:characterId" element={<CharacterRoute />} />
             <Route path="lora-training" element={<LoraTrainingPage />} />
           </Route>

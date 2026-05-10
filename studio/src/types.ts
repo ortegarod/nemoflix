@@ -102,7 +102,6 @@ export interface Shot {
   voiceover: string | null;
   image_prompt: string | null;
   motion_prompt: string | null;
-  camera_motion: string | null;
   characters: string[];
   duration_seconds: number;
   status: string;

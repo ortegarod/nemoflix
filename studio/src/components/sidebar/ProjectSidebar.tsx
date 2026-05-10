@@ -39,10 +39,10 @@ export function ProjectSidebar({ data, onDeleteScene }: ProjectSidebarProps) {
           const generated = sceneShots.filter((s) => s.image_file).length;
           const active = scene.id === selectedSceneId;
           return (
-            <button
+            <div
               key={scene.id}
               onClick={() => onSelectScene(scene.id)}
-              className={`w-full text-left rounded-xl px-3 py-2.5 transition group ${active ? "bg-rose-600/10 ring-1 ring-rose-500/30" : "hover:bg-gray-900/50"}`}
+              className={`w-full text-left rounded-xl px-3 py-2.5 transition cursor-pointer group ${active ? "bg-rose-600/10 ring-1 ring-rose-500/30" : "hover:bg-gray-900/50"}`}
             >
               <div className="flex items-center justify-between gap-2 mb-1">
                 <div className="flex items-center gap-2 min-w-0">
@@ -70,7 +70,7 @@ export function ProjectSidebar({ data, onDeleteScene }: ProjectSidebarProps) {
                   </span>
                 )}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
