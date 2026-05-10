@@ -77,7 +77,13 @@ export function ProjectFilmsView({ projectId, onBack }: ProjectFilmsViewProps) {
     );
   }
 
-  const aspectClass = project?.aspect_ratio === "16:9" ? "aspect-[16/9]" : project?.aspect_ratio === "1:1" ? "aspect-[1/1]" : "aspect-[9/16]";
+  const ar = project?.aspect_ratio ?? "9:16";
+  const aspectClass = ar === "16:9" ? "aspect-[16/9]" : ar === "1:1" ? "aspect-square" : "aspect-[9/16]";
+  const gridClass = ar === "16:9"
+    ? "grid gap-6 sm:grid-cols-2 max-w-4xl mx-auto"
+    : ar === "1:1"
+    ? "grid gap-4 sm:grid-cols-2 lg:grid-cols-3 max-w-3xl mx-auto"
+    : "grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 max-w-3xl mx-auto";
 
   return (
     <div className="h-full flex flex-col bg-black">
@@ -105,7 +111,7 @@ export function ProjectFilmsView({ projectId, onBack }: ProjectFilmsViewProps) {
             <p className="text-xs text-gray-600 mt-1">Go back and hit Re-render to create one.</p>
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 max-w-5xl mx-auto">
+          <div className={gridClass}>
             {films.map((f) => (
               <div
                 key={f.id}

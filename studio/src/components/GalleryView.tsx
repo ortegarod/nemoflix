@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useCallback } from "react";
 import { ArrowRight, Film, Image, Search, SlidersHorizontal, Video } from "lucide-react";
 import { JobCard } from "./JobCard";
 import { MediaTile } from "./MediaTile";
+import { generateVideo } from "../api";
 import type { JobItem, MediaItem } from "../types";
 
 type Filter = "all" | "images" | "videos";
@@ -23,6 +24,26 @@ function isVideo(item: MediaItem) {
 export function StudioView({ items, jobs, loading, error, onOpen, onDelete, onOpenProjects }: StudioViewProps) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [generatingVideo, setGeneratingVideo] = useState<Set<string>>(new Set());
+
+  const handleGenerateVideo = useCallback(async (item: MediaItem, motionPrompt: string) => {
+    const key = item.filename || item.url;
+    setGeneratingVideo((prev) => new Set(prev).add(key));
+    try {
+      await generateVideo({
+        image: item.filename || item.url.split("/").pop() || "",
+        prompt: motionPrompt || undefined,
+      });
+    } catch (err) {
+      console.error("I2V failed:", err);
+    } finally {
+      setGeneratingVideo((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, []);
 
   const imageCount = items.filter((item) => !isVideo(item)).length;
   const videoCount = items.length - imageCount;
@@ -125,6 +146,7 @@ export function StudioView({ items, jobs, loading, error, onOpen, onDelete, onOp
               item={item}
               onOpen={() => onOpen(item.url)}
               onDelete={onDelete}
+              onGenerateVideo={handleGenerateVideo}
             />
           ))}
         </div>

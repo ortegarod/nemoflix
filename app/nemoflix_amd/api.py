@@ -30,12 +30,16 @@ from .workflows import WAN_NEGATIVE, build_flux2_lora_image, build_wan22_i2v, bu
 ELEVENLABS_VOICE_ID = "CwhRBWXzGAHq8TQ4Fs17"  # Roger — Laid-Back, Casual, Resonant
 
 
-async def _generate_tts(text: str, output_path: Path, voice_id: str | None = None, voice_settings: dict[str, Any] | None = None) -> bool:
-    """Generate TTS audio via ElevenLabs and save to output_path."""
+async def _generate_tts(text: str, output_path: Path, voice_id: str | None = None, voice_settings: dict[str, Any] | None = None) -> tuple[bool, float | None]:
+    """Generate TTS audio via ElevenLabs with-timestamps endpoint.
+
+    Returns (success, speech_end_seconds) where speech_end_seconds is the exact
+    moment the last character is spoken, or None if unavailable.
+    """
     settings = get_settings()
     api_key = settings.elevenlabs_api_key
     if not api_key:
-        return False
+        return False, None
     payload: dict[str, Any] = {
         "text": text,
         "model_id": "eleven_multilingual_v2",
@@ -47,19 +51,22 @@ async def _generate_tts(text: str, output_path: Path, voice_id: str | None = Non
         "style": vs.get("style", 0.2),
         "use_speaker_boost": vs.get("use_speaker_boost", True),
     }
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id or ELEVENLABS_VOICE_ID}",
-                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(resp.content)
-            return True
-    except Exception:
-        return False
+    import base64
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id or ELEVENLABS_VOICE_ID}/with-timestamps",
+            headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        audio_bytes = base64.b64decode(data["audio_base64"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(audio_bytes)
+        alignment = data["alignment"]
+        end_times = alignment["character_end_times_seconds"]
+        speech_end = float(end_times[-1])
+        return True, speech_end
 
 
 async def _tts_voices() -> list[dict[str, Any]]:
@@ -687,10 +694,10 @@ async def agent_chat(payload: dict[str, Any]) -> dict[str, Any]:
         break
 
     text = (
-        "I’m the built-in Nemoflix agent surface. I can use the same API shape OpenClaw uses: "
+        "I'm the built-in Nemoflix agent surface. I can use the same API shape OpenClaw uses: "
         "characters, image/video generation, projects, GPU nodes, and ai-toolkit LoRA training. "
-        "For this hackathon demo I’m wired through assistant-ui; the next step is enabling tool execution for requests like"
-        f" ‘{last_text or 'generate an image'}’."
+        "For this hackathon demo I'm wired through assistant-ui; the next step is enabling tool execution for requests like"
+        f" ‘{last_text or 'generate an image'}'."
     )
     return {"ok": True, "text": text}
 
@@ -1081,6 +1088,19 @@ async def _set_render_status(project_id: str, status: str, error: str | None = N
         })
 
 
+async def _probe_duration(path: Path) -> float:
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    try:
+        return float(stdout.decode().strip())
+    except (ValueError, AttributeError):
+        return 5.0
+
+
 async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: str) -> None:
     # Create the render record in the database
     render_number = await next_render_number(project_id)
@@ -1131,119 +1151,63 @@ async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: s
             clip_pairs.append((still_path, shot))
         # no media — skip
 
-    # ── Look up voice for each shot based on speaker ──
-    project = await get_project(project_id)
-    character_voices: dict[str, dict[str, Any]] = {}
-    for cid in (project.get("characters") if project else []):
-        char = await get_character(cid)
-        if char and char.get("voice"):
-            voice = char["voice"]
-            if isinstance(voice, str):
-                try:
-                    voice = json.loads(voice)
-                except Exception:
-                    voice = {}
-            if isinstance(voice, dict):
-                character_voices[cid] = voice
+    if not clip_pairs:
+        await _set_render_status(project_id, "failed", "No renderable clips found")
+        return
 
-    narrator_voice = project.get("narrator_voice") if project else None
-    if isinstance(narrator_voice, str):
-        try:
-            narrator_voice = json.loads(narrator_voice)
-        except Exception:
-            narrator_voice = None
-    if not isinstance(narrator_voice, dict):
-        narrator_voice = None
-
-    # ── Generate TTS voiceovers and mix into clips ──
-    mixed_clips: list[Path] = []
+    # ── Burn subtitle text into each clip ──
+    output_clips: list[Path] = []
     for idx, (clip_path, shot) in enumerate(clip_pairs, start=1):
         subtitle_text = (shot.get("subtitle") or "").strip()
-        duration = float(shot.get("duration_seconds") or 5)
-        speaker = (shot.get("speaker") or "").strip()
-
         if subtitle_text:
-            voice_id: str | None = None
-            voice_settings: dict[str, Any] | None = None
+            import textwrap
+            wrapped = "\n".join(textwrap.wrap(subtitle_text, width=32))
+            safe_text = (
+                wrapped
+                .replace("\\", "\\\\")
+                .replace("'", "'")
+                .replace(":", "\\:")
+                .replace("%", "\\%")
+                .replace("\n", "\\n")
+            )
+            drawtext = (
+                f"drawtext=text='{safe_text}'"
+                f":fontsize=26:fontcolor=white:borderw=2:bordercolor=black"
+                f":x=(w-text_w)/2:y=h-line_h*{wrapped.count(chr(10))+1}-50"
+            )
+            sub_path = _OUTPUT_DIR / f"projects/{project_id}/render-{render_id}-shot{idx:02d}-sub.mp4"
+            sub_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(clip_path),
+                "-vf", drawtext,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "copy",
+                str(sub_path),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *sub_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                await _set_render_status(project_id, "failed", f"subtitle burn failed shot {idx}: {stderr.decode(errors='replace')[-400:]}")
+                return
+            output_clips.append(sub_path)
+        else:
+            output_clips.append(clip_path)
 
-            if speaker and speaker in character_voices:
-                v = character_voices[speaker]
-                voice_id = v.get("voice_id")
-                voice_settings = v.get("settings")
-            elif narrator_voice:
-                voice_id = narrator_voice.get("voice_id")
-                voice_settings = narrator_voice.get("settings")
-
-            if voice_id:
-                tts_path = _OUTPUT_DIR / f"projects/{project_id}/render-{render_id}-shot{idx:02d}-tts.mp3"
-                tts_ok = await _generate_tts(subtitle_text, tts_path, voice_id=voice_id, voice_settings=voice_settings)
-                if tts_ok:
-                    mixed_path = _OUTPUT_DIR / f"projects/{project_id}/render-{render_id}-shot{idx:02d}-mixed.mp4"
-                    mix_cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(clip_path),
-                        "-i", str(tts_path),
-                        "-c:v", "copy",
-                        "-c:a", "aac",
-                        "-b:a", "192k",
-                        "-af", f"volume=0.9,apad=pad_dur=0.5",
-                        "-shortest",
-                        "-t", str(duration),
-                        str(mixed_path),
-                    ]
-                    proc = await asyncio.create_subprocess_exec(
-                        *mix_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    await proc.communicate()
-                    if proc.returncode == 0:
-                        mixed_clips.append(mixed_path)
-                        continue
-            # Fallback to original clip
-            mixed_clips.append(clip_path)
-            continue
-        # No subtitle — use original clip
-        mixed_clips.append(clip_path)
-
-    # ── Concatenate mixed clips ──
+    # ── Concatenate clips ──
     concat_tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, prefix="nemo_concat_")
     try:
-        for p in mixed_clips:
+        for p in output_clips:
             concat_tmp.write(f"file '{p}'\n")
         concat_tmp.flush()
         concat_path = concat_tmp.name
     finally:
         concat_tmp.close()
 
-    srt_path: str | None = None
-    srt_entries: list[str] = []
-    cumulative = 0.0
-    for idx, (_, shot) in enumerate(clip_pairs, start=1):
-        duration = float(shot.get("duration_seconds") or 5)
-        subtitle = (shot.get("subtitle") or "").strip()
-        if subtitle:
-            srt_entries.append(
-                f"{idx}\n{_srt_timestamp(cumulative)} --> {_srt_timestamp(cumulative + duration)}\n{subtitle}\n"
-            )
-        cumulative += duration
-
-    if srt_entries:
-        srt_tmp = tempfile.NamedTemporaryFile("w", suffix=".srt", delete=False, prefix="nemo_srt_")
-        try:
-            srt_tmp.write("\n".join(srt_entries))
-            srt_tmp.flush()
-            srt_path = srt_tmp.name
-        finally:
-            srt_tmp.close()
-
-    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path]
-    if srt_path:
-        style = "FontSize=22,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2"
-        cmd += ["-vf", f"subtitles={srt_path}:force_style='{style}'", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "192k"]
-    else:
-        cmd += ["-c:v", "copy", "-c:a", "copy"]
-    cmd += [str(out_path)]
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_path, "-c:v", "copy", "-c:a", "copy", str(out_path)]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -1253,8 +1217,6 @@ async def _run_render(project_id: str, shots: list[dict[str, Any]], render_id: s
     _, stderr = await proc.communicate()
 
     Path(concat_path).unlink(missing_ok=True)
-    if srt_path:
-        Path(srt_path).unlink(missing_ok=True)
 
     if proc.returncode != 0:
         err = stderr.decode(errors="replace")[-800:]

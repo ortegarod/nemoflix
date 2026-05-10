@@ -345,12 +345,11 @@ export default function App() {
   const [projectId, setProjectId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!hasLoadedOnce) setLoading(true);
     try {
       setError(null);
       const listing = await fetchJson<{ images?: MediaItem[] }>("/api/listing", 8000);
       setItems(listing.images || []);
-      setHasLoadedOnce(true);
+      if (!hasLoadedOnce) setHasLoadedOnce(true);
     } catch (e) {
       console.error("Failed to load gallery", e);
       setError(e instanceof Error ? e.message : "Failed to load gallery");
@@ -372,21 +371,25 @@ export default function App() {
       setCheckpoints(checkpointsResult.value.checkpoints || []);
     if (trainingJobsResult.status === "fulfilled")
       setTrainingJobs(trainingJobsResult.value.jobs || []);
-  }, [hasLoadedOnce]);
+  }, []);
+
+  // Stable polling — uses refs to avoid dependency churn
+  const loadRef = useRef(load);
+  loadRef.current = load;
 
   useEffect(() => {
-    load();
-    const id = window.setInterval(load, 5000);
+    loadRef.current();
+    const id = window.setInterval(() => loadRef.current(), 5000);
 
     const es = new EventSource("/api/events");
-    es.addEventListener("job_update", () => load());
+    es.addEventListener("job_update", () => loadRef.current());
     es.onerror = () => {};
 
     return () => {
       window.clearInterval(id);
       es.close();
     };
-  }, [load]);
+  }, []);
 
   const loadProject = useCallback(async (id: string) => {
     setProjectId(id);
