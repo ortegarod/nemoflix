@@ -1,9 +1,9 @@
 ---
-name: nemoflix-amd
+name: nemoflix
 description: Read this when your human asks for AI image or video generation. Nemoflix is an HTTP API backed by ComfyUI on AMD GPU infrastructure. It gives you two ways to work — Studio (freeform single-shot generation, output lands in a gallery) and Projects (structured directorial work where you write a script, break it into scenes and shots, generate images per shot, animate approved shots, and assemble a final video). Use this skill to interpret your human's creative request, decide between a quick shot or a multi-shot storyboard pipeline, and drive the API on their behalf.
 ---
 
-# Nemoflix AMD Skill
+# Nemoflix Skill
 
 You are reading this to learn how to use Nemoflix to make images and videos for your human. Nemoflix is the website and API. **You** are the agent driving it. There is no separate scriptwriter, no separate director — when your human pitches an idea, you write the script, plan the shots, call the API, and show them what you made.
 
@@ -60,7 +60,29 @@ For advanced multi-character control, pass `characters` as character binding obj
 
 `characters` items support `id`, optional `role`, optional `reference_image`, and optional `lora_strength`. The backend resolves the character record, automatically adds the character trigger word to the prompt when needed, and uses the character's LoRA when that workflow supports it. Current direct image generation requires either a character with a `flux2_lora` LoRA or a raw `checkpoint`. Direct image-to-video can use a character reference image if no `image` is supplied.
 
-Do not claim Nemoflix can train a LoRA from this skill alone. The current backend exposes LoRA training status/checkpoint reads, but no `/api/lora-training/start` route is implemented in the API code.
+## Start a LoRA training job
+
+If your human wants to train a new character identity, use `/api/lora-training/start`. They need to have uploaded images to a dataset folder on the droplet first. Register the dataset, then start training:
+
+```bash
+# Register the dataset
+curl -sS -X POST "$NEMOFLIX_API_URL/api/lora-training/datasets" \
+  -H "Content-Type: application/json" \
+  -d '{"id": "<run-name>", "name": "My Character"}'
+
+# Start training
+curl -sS -X POST "$NEMOFLIX_API_URL/api/lora-training/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_name": "my-character-v1",
+    "trigger_word": "mycharacter",
+    "dataset": "<run-name>",
+    "base_config": "flux2_identity",
+    "model": "flux2_dev"
+  }'
+```
+
+Monitor with `GET /api/lora-training/status`. Checkpoints appear at `GET /api/lora-training/checkpoints` as training progresses. Training runs on the AMD GPU and takes time — tell your human and don't block waiting for it.
 
 ## Generate an image
 

@@ -2349,6 +2349,18 @@ async def lora_training_checkpoints(job_name: str | None = None) -> LoraCheckpoi
     )
 
 
+@app.get("/api/lora-training/checkpoints/download")
+async def lora_training_checkpoint_download(name: str) -> FileResponse:
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    target = (_LORA_OUTPUT_DIR / name).resolve()
+    if not str(target).startswith(str(_LORA_OUTPUT_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(target, filename=name, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @app.get("/api/lora-training/jobs")
 async def lora_training_jobs():
     jobs = await list_training_jobs()

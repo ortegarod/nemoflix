@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Info, Settings, Terminal, X, Cpu, Users, BookOpen, Search, Sparkles, Bot, Image, Box, Film } from "lucide-react";
+import { Info, Settings, Terminal, X, Cpu, Users, BookOpen, Search, Sparkles, Bot, Image, Box, Film, Copy, Check } from "lucide-react";
 import type { LoraCheckpoint, ProjectModeData } from "../../types";
 import { GenerateTab } from "./GenerateTab";
 import { NodesTab } from "./NodesTab";
@@ -35,7 +35,7 @@ export function AppSidebar({ activeTab, onTabChange, onClose, checkpoints, onQue
     { id: "characters", icon: <Users className="w-4 h-4" />, label: "Characters & LoRA Training", visible: true },
     { id: "agents", icon: <Bot className="w-4 h-4" />, label: "Agents", visible: true },
     { id: "projects", icon: <Film className="w-4 h-4" />, label: "Projects", visible: true },
-    { id: "guide", icon: <BookOpen className="w-4 h-4" />, label: "Guide", visible: true },
+    { id: "guide", icon: <BookOpen className="w-4 h-4" />, label: "Skill", visible: true },
     { id: "info", icon: <Info className="w-4 h-4" />, label: "Info", visible: true },
     { id: "nodes", icon: <Cpu className="w-4 h-4" />, label: "Nodes", visible: true },
   ];
@@ -286,6 +286,7 @@ function CreateCharacterWorkflow() {
 }
 
 function GuideTab() {
+  const [copied, setCopied] = useState(false);
   const apiRoot = typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8190";
   const examples = [
     { label: "List characters", cmd: `curl ${apiRoot}/api/characters` },
@@ -312,11 +313,33 @@ function GuideTab() {
   -d '{"character":"rigo","prompt":"walks forward","width":1024,"height":1024,"length":41}'` },
   ];
 
+  const allContent = examples.map(ex => `# ${ex.label}\n${ex.cmd}`).join("\n\n");
+
+  const handleCopy = () => {
+    const textarea = document.createElement("textarea");
+    textarea.value = allContent;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
     <div className="h-full overflow-y-auto p-4 space-y-3">
-      <p className="text-xs text-gray-500 leading-relaxed">
-        Paste these into a terminal or send them to your agent. Replace <code className="text-gray-400">&lt;prj_id&gt;</code> / <code className="text-gray-400">&lt;scn_id&gt;</code> / <code className="text-gray-400">&lt;sht_id&gt;</code> with actual IDs.
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-gray-500 leading-relaxed">
+          Paste into your agent to drive the full Nemoflix workflow.
+        </p>
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-700 bg-gray-900 text-xs text-gray-300 hover:text-white hover:border-fuchsia-500/50 transition flex-shrink-0 ml-2"
+        >
+          {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+          {copied ? "Copied" : "Copy all"}
+        </button>
+      </div>
       {examples.map((ex) => (
         <div key={ex.label} className="space-y-1">
           <p className="text-[11px] font-medium text-gray-400">{ex.label}</p>

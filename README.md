@@ -1,127 +1,113 @@
 # Nemoflix
 
-Agent-native image and video generation using ComfyUI as a headless execution engine.
+Agent-native image and video generation studio powered by ComfyUI and AMD GPUs.
 
-Nemoflix is designed for AI agents first. Agents call a simple HTTP API; Nemoflix builds and submits ComfyUI workflows behind the scenes. ComfyUI's browser UI is not part of the workflow.
+## What It Is
 
-## What this repo does now
+Agents call a REST API; Nemoflix builds and submits ComfyUI workflows behind the scenes. Includes a Studio UI for human-in-the-loop editing.
 
-- Starts a small FastAPI service for agent-driven generation
-- Talks to ComfyUI through its native HTTP API
-- Trains Flux2 identity LoRAs on AMD MI300X and monitors training progress
-- Generates images with character LoRAs through Flux2
-- Builds Wan 2.2 video workflow JSON in code
-- Supports text-to-video and image-to-video requests
+## Features
+
+- Image generation with Flux2 + character LoRAs
+- Video generation with Wan 2.2 (text-to-video and image-to-video)
+- Flux2 identity LoRA training on AMD MI300X
+- Projects → scenes → shots with version history
+- Persistent character profiles with LoRA associations
+- React/Vite Studio UI
+
+## Architecture
+
+| Layer | Technology |
+|---|---|
+| API | FastAPI (Python) |
+| Generation engine | ComfyUI |
+| Training | Ostris AI Toolkit (ROCm) |
+| Studio UI | React + Vite |
+| Database | PostgreSQL |
+| Target GPU | AMD Instinct MI300X, ROCm 7.2 |
 
 
-## API
+## Getting Started
 
-Default local service ports:
+### AMD Developer Cloud (ROCm 7.2 droplet)
 
-| Service | Port |
-| --- | ---: |
-| ComfyUI | `8188` |
-| Nemoflix API | `8190` |
+Paste `scripts/startup-script.sh` into the droplet's user data field when provisioning. It clones the repo, installs ComfyUI, the API, required models, and starts all services.
 
-### Health
+### Configuration
+
+Copy `.env.example` to `.env`:
+
+| Variable | Description |
+|---|---|
+| `COMFY_URL` | ComfyUI base URL |
+| `DATABASE_URL` | PostgreSQL connection string |
+| `AITK_API_URL` | AI Toolkit API URL |
+| `NEMOFLIX_OUTPUT_DIR` | Output directory |
+| `ELEVENLABS_API_KEY` | TTS — optional |
+
+GPU node routing lives in `config.json`.
+
+## Usage
+
+### Studio UI
+
+A React/Vite interface for managing characters, projects, scenes, shots, and generation jobs.
 
 ```bash
-curl -sS http://127.0.0.1:8190/api/health
+cd studio && npm install && npm run dev
 ```
 
-### LoRA training status
+### API
+
+Set `COMFY_URL` to point at your ComfyUI instance.
 
 ```bash
-curl -sS http://127.0.0.1:8190/api/lora-training/status
-curl -sS http://127.0.0.1:8190/api/lora-training/checkpoints
+# Health
+curl http://<your-host>:8190/api/health
+
+# Generate image
+curl -X POST http://<your-host>:8190/api/image/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "a man standing on a cliff overlooking the ocean at sunset, warm golden light, waves crashing below, photorealistic", "width": 1024, "height": 1024}'
+
+# Check job
+curl http://<your-host>:8190/api/jobs/<prompt_id>
 ```
 
-### Upload image
+## LoRA Training
+
+### Prepare
+
+Add reference images to `/root/nemoflix-training/datasets/<run-name>/`, then register the dataset:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8190/api/images/upload \
-  -F "file=@/path/to/source.png"
+curl -X POST http://<your-host>:8190/api/lora-training/datasets \
+  -H "Content-Type: application/json" \
+  -d '{"id": "<run-name>", "name": "My Character"}'
 ```
 
-### Generate image-to-video
+### Train
+
+Submit a training job through the API. Nemoflix builds the config internally — you just describe the job:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8190/api/video/generate \
+curl -X POST http://<your-host>:8190/api/lora-training/start \
   -H "Content-Type: application/json" \
   -d '{
-    "mode": "i2v",
-    "image": "source.png",
-    "prompt": "cinematic shot, subject walking through neon rain",
-    "width": 1280,
-    "height": 720,
-    "length": 121,
-    "fps": 16
+    "job_name": "my-character-v1",
+    "trigger_word": "mycharacter",
+    "dataset": "my-character",
+    "base_config": "flux2_identity",
+    "model": "flux2_dev"
   }'
 ```
 
-### Generate text-to-video
+Training runs on the AMD GPU. Monitor progress with `GET /api/lora-training/status` — checkpoints appear at `GET /api/lora-training/checkpoints` as they complete.
 
-```bash
-curl -sS -X POST http://127.0.0.1:8190/api/video/generate \
-  -H "Content-Type: application/json" \
-  -d '{
-    "mode": "t2v",
-    "prompt": "cinematic tracking shot through a futuristic city at night",
-    "width": 1280,
-    "height": 720,
-    "length": 121,
-    "fps": 16
-  }'
-```
+## Contributing
 
-### Check job
+Issues and PRs welcome. Test against a ROCm environment if touching generation or training code.
 
-```bash
-curl -sS http://127.0.0.1:8190/api/jobs/<prompt_id>
-```
+## License
 
-## Development
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-PYTHONPATH=app uvicorn nemoflix_amd.api:app --host 0.0.0.0 --port 8190
-```
-
-Point the API at a ComfyUI server with:
-
-```bash
-export COMFY_URL=http://127.0.0.1:8188
-```
-
-## Repo structure
-
-```text
-app/nemoflix_amd/          # API service and workflow builders
-scripts/                   # optional deployment/setup helpers
-research/                  # research notes
-training/                  # local training data and outputs, gitignored
-  datasets/                # prepared training datasets per run
-  output/                  # LoRA / model training outputs
-outputs/                   # generated outputs, gitignored
-```
-
-## Hackathon infrastructure
-
-This repo is being built for the AMD Developer Hackathon and currently targets the AMD GPU Developer Cloud environment available through DigitalOcean GPU Droplets.
-
-Reference hardware:
-
-| Resource | Spec |
-| --- | --- |
-| GPU | 1x AMD Instinct MI300X |
-| VRAM | 192 GB |
-| vCPU | 20 |
-| RAM | 240 GB |
-| Boot disk | 720 GB NVMe SSD |
-| Scratch disk | 5 TB NVMe SSD |
-| GPU software | ROCm 7.2 image |
-| Cost | About $1.99/GPU-hour |
-
-The setup scripts assume a fresh Ubuntu ROCm droplet and install ComfyUI plus the Nemoflix API service.
+Apache 2.0 — see [LICENSE](LICENSE).
